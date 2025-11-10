@@ -1,0 +1,86 @@
+{{- $fullname := include "rke2-harvester.fullname" . -}}
+{{- $cloudConfig := printf "%s-cloud-config" $fullname -}}
+{{- $imageNamespace := .Values.image.namespace -}}
+{{- $imageName := .Values.image.name -}}
+{{- $imageID := printf "%s/%s" .Values.image.namespace .Values.image.name -}}
+{{- $defaultSC := printf "longhorn-%s" .Values.image.name -}}
+{{- $storageClass := .Values.storage.className | default $defaultSC -}}
+{{- $accessMode := .Values.storage.accessMode -}}
+{{- $volumeMode := .Values.storage.volumeMode -}}
+{{- $storageSize := .Values.storage.size -}}
+{{- $wkCount := .Values.replicaCounts.worker | int -}}
+{{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
+{{- $roles := list
+  (dict "key" "controlplane" "description" "RKE2 control-plane VM for Harvester" "cpu" (int (default 2 .Values.resources.controlPlane.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi))))
+  (dict "key" "worker" "description" "RKE2 worker VM for Harvester" "cpu" (int (default 2 .Values.resources.worker.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.worker.memoryMi))))
+-}}
+{{- range $role := $roles }}
+{{- if or (ne $role.key "worker") (gt $wkCount 0) }}
+{{- $templateName := printf "%s-%s-template" $fullname $role.key -}}
+{{- $versionName := printf "%s-%s-version" $fullname $role.key -}}
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplate
+metadata:
+  name: {{ $templateName }}
+  namespace: rke2
+spec:
+  description: {{ $role.description }}
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplateVersion
+metadata:
+  name: {{ $versionName }}
+  namespace: rke2
+  annotations:
+    harvesterhci.io/default-userdata-secret: {{ $cloudConfig }}
+spec:
+  templateId: rke2/{{ $templateName }}
+  vm:
+    metadata:
+      annotations:
+        harvesterhci.io/volumeClaimTemplates: |-
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" "pvc-rootdisk" "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $storageSize) | indent 10 }}
+    spec:
+      runStrategy: Always
+      template:
+        spec:
+          evictionStrategy: LiveMigrateIfPossible
+          domain:
+            cpu:
+              cores: {{ $role.cpu }}
+            resources:
+              limits:
+                memory: {{ $role.memory }}
+                cpu: {{ $role.cpu }}
+              requests:
+                memory: {{ $role.memory }}
+                cpu: {{ $role.cpu }}
+            devices:
+              autoattachPodInterface: false
+              disks:
+              - name: rootdisk
+                bootOrder: 1
+                disk:
+                  bus: virtio
+              - name: cloudinitdisk
+                disk:
+                  bus: virtio
+              interfaces:
+              - name: primary
+                bridge: {}
+                model: virtio
+          networks:
+          - name: primary
+            multus:
+              networkName: {{ $vmNetwork }}
+          volumes:
+          - name: rootdisk
+            persistentVolumeClaim:
+              claimName: pvc-rootdisk
+          - name: cloudinitdisk
+            cloudInitNoCloud:
+              secretRef:
+                name: {{ $cloudConfig }}
+{{ end }}
+{{- end }}

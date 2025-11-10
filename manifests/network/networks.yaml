@@ -1,0 +1,41 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vlan2003
+  namespace: hvst-mgmt
+  labels:
+    network.harvesterhci.io/clusternetwork: mgmt
+    network.harvesterhci.io/type: L2VlanNetwork
+    network.harvesterhci.io/vlan-id: "2003"
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "vlan2003",
+      "type": "bridge",
+      "bridge": "mgmt-br",
+      "promiscMode": true,
+      "vlan": 2003,
+      "ipam": {}
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vlan1003
+  namespace: hvst-mgmt
+  labels:
+    network.harvesterhci.io/clusternetwork: mgmt
+    network.harvesterhci.io/type: L2VlanNetwork
+    network.harvesterhci.io/vlan-id: "1003"
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "vlan1003",
+      "type": "bridge",
+      "bridge": "mgmt-br",
+      "promiscMode": true,
+      "vlan": 1003,
+      "ipam": {}
+    }

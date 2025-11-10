@@ -1,0 +1,67 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplate
+metadata:
+  name: rke2-controlplane-template
+  namespace: rke2
+spec:
+  description: RKE2 control-plane VM for Harvester
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplateVersion
+metadata:
+  name: rke2-controlplane-template-v1
+  namespace: rke2
+  annotations:
+    harvesterhci.io/default-userdata-secret: rke2-cloud-config
+spec:
+  templateId: rke2/rke2-controlplane-template
+  vm:
+    metadata:
+      annotations:
+        harvesterhci.io/volumeClaimTemplates: |-
+          [{"metadata":{"name":"pvc-rootdisk","annotations":{"harvesterhci.io/imageId":"harvester-public/rocky-9-cloudimg"}},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"30Gi"}},"volumeMode":"Block","storageClassName":"longhorn"}}]
+    spec:
+      runStrategy: Always
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: rke2
+            app.kubernetes.io/component: controlplane
+        spec:
+          evictionStrategy: LiveMigrateIfPossible
+          domain:
+            cpu:
+              cores: 2
+            resources:
+              limits:
+                memory: 4096Mi
+                cpu: 2
+              requests:
+                memory: 4096Mi
+                cpu: 2
+            devices:
+              autoattachPodInterface: false
+              disks:
+              - name: rootdisk
+                bootOrder: 1
+                disk:
+                  bus: virtio
+              - name: cloudinitdisk
+                disk:
+                  bus: virtio
+              interfaces:
+              - name: primary
+                bridge: {}
+                model: virtio
+          networks:
+          - name: primary
+            multus:
+              networkName: hvst-mgmt/vlan2003
+          volumes:
+          - name: rootdisk
+            persistentVolumeClaim:
+              claimName: pvc-rootdisk
+          - name: cloudinitdisk
+            cloudInitNoCloud:
+              secretRef:
+                name: rke2-cloud-config

@@ -1,0 +1,34 @@
+#!/bin/bash
+set -e
+
+source $(dirname $0)/version
+
+SUFFIX="-${ARCH}"
+
+cd $(dirname $0)/..
+
+TAG=${TAG:-${VERSION}${SUFFIX}}
+REPO=${REPO:-rancher}
+
+if echo $TAG | grep -q dirty; then
+    TAG=dev
+fi
+
+CONTROLLER_IMAGE=${REPO}/harvester-network-controller:${TAG}
+HELPER_IMAGE=${REPO}/harvester-network-helper:${TAG}
+WEBHOOK_IMAGE=${REPO}/harvester-network-webhook:${TAG}
+DOCKERFILE_CONTROLLER=package/Dockerfile
+DOCKERFILE_HELPER=package/Dockerfile.helper
+DOCKERFILE_WEBHOOK=package/Dockerfile.webhook
+if [ -e ${DOCKERFILE}.${ARCH} ]; then
+    DOCKERFILE=${DOCKERFILE}.${ARCH}
+fi
+
+buildx build --load -f ${DOCKERFILE_CONTROLLER} -t ${CONTROLLER_IMAGE} .
+echo Built ${CONTROLLER_IMAGE}
+
+buildx build --load -f ${DOCKERFILE_HELPER} -t ${HELPER_IMAGE} .
+echo Built ${HELPER_IMAGE}
+
+buildx build --load -f ${DOCKERFILE_WEBHOOK} -t ${WEBHOOK_IMAGE} .
+echo Built ${WEBHOOK_IMAGE}

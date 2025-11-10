@@ -1,0 +1,44 @@
+# ------------------------------------------------------------------
+# Global settings
+# ------------------------------------------------------------------
+replicaCounts:
+  controlPlane: 3          # number of RKE2 control‑plane VMs
+  worker: 0              # number of RKE2 worker VMs
+
+image:
+  namespace: harvester-public        # Namespace that holds the VirtualMachineImage
+  name: rocky-9-cloudimg             # Must exist in Harvester’s Image catalog
+  pullPolicy: IfNotPresent
+
+vmNamePrefix: rke2                   # Prefix for VM names (falls back to release name)
+
+storage:
+  className: ""                  # leave empty to let Harvester pick the per-image StorageClass
+  accessMode: ReadWriteMany
+  volumeMode: Block
+  size: 30Gi                    # default/fallback size
+  controlPlaneSize: 100Gi
+  workerSize: 150Gi
+
+networks:
+  vm:
+    namespace: hvst-mgmt
+    name: vlan2003                   # Workload VM network (VLAN 2003)
+
+resources:
+  controlPlane:
+    cpuCores: 2
+    memoryMi: 4096
+  worker:
+    cpuCores: 2
+    memoryMi: 4096
+
+ssh:
+  user: rocky                     # user that cloud‑init will create
+  publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK6LbWP3r925P5b+vFcbldXIppYkWgOsqtG6KBINXSEp jruds@ag-mbp.local"  # fill with your SSH public key (optional)
+  password: rocky2025             # optional console password (plain text)
+
+rke2:
+  token: "YCWf9e6tKSzD$vp0pd1jt&Mm2aBDKFWTczA#S$f!FMCNww#"                        # will be filled from secret rke2-token
+  version: "v1.33.5+rke2r1"        # RKE2 version you want to run
+  cni: "canal"                     # or calico, multus, etc.

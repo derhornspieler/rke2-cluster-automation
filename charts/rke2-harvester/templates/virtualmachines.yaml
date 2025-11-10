@@ -1,0 +1,170 @@
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $cloudConfig := printf "%s-cloud-config" (include "rke2-harvester.fullname" .) -}}
+{{- $imageNamespace := .Values.image.namespace -}}
+{{- $imageName := .Values.image.name -}}
+{{- $imageID := printf "%s/%s" .Values.image.namespace .Values.image.name -}}
+{{- $defaultSC := printf "longhorn-%s" .Values.image.name -}}
+{{- $storageClass := .Values.storage.className | default $defaultSC -}}
+{{- $accessMode := .Values.storage.accessMode -}}
+{{- $volumeMode := .Values.storage.volumeMode -}}
+{{- $cpDisk := .Values.storage.controlPlaneSize | default .Values.storage.size -}}
+{{- $wkDisk := .Values.storage.workerSize | default .Values.storage.size -}}
+{{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
+{{- $cpCPU := int (default 2 .Values.resources.controlPlane.cpuCores) -}}
+{{- $cpMem := printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi)) -}}
+{{- $wkCPU := int (default 2 .Values.resources.worker.cpuCores) -}}
+{{- $wkMem := printf "%dMi" (int (default 4096 .Values.resources.worker.memoryMi)) -}}
+{{- $cpCount := .Values.replicaCounts.controlPlane | int -}}
+{{- $wkCount := .Values.replicaCounts.worker | int -}}
+
+# ------------------------------------------------------------------
+# Control‑plane VirtualMachines
+# ------------------------------------------------------------------
+{{- range $i := until $cpCount }}
+{{- $vmOrdinal := add $i 1 -}}
+{{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
+{{- $pvcName := printf "%s-rootdisk" $vmName -}}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ $vmName }}
+  namespace: rke2
+  labels:
+    app.kubernetes.io/name: {{ $namePrefix }}
+    app.kubernetes.io/component: controlplane
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $cpDisk) | indent 6 }}
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $namePrefix }}
+        app.kubernetes.io/component: controlplane
+        harvesterhci.io/rke2-role: controlplane
+    spec:
+      hostname: {{ $vmName }}
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: {{ $namePrefix }}
+            app.kubernetes.io/component: controlplane
+      domain:
+        cpu:
+          cores: {{ $cpCPU }}
+        resources:
+          limits:
+            memory: {{ $cpMem }}
+            cpu: {{ $cpCPU }}
+          requests:
+            memory: {{ $cpMem }}
+            cpu: {{ $cpCPU }}
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+      networks:
+      - name: primary
+        multus:
+          networkName: {{ $vmNetwork }}
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: {{ $pvcName }}
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: {{ $cloudConfig }}
+{{ end }}
+
+# ------------------------------------------------------------------
+# Worker VirtualMachines
+# ------------------------------------------------------------------
+{{- range $i := until $wkCount }}
+{{- $vmOrdinal := add $i 1 -}}
+{{- $vmName := printf "%s-wk-%d" $namePrefix $vmOrdinal -}}
+{{- $pvcName := printf "%s-rootdisk" $vmName -}}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ $vmName }}
+  namespace: rke2
+  labels:
+    app.kubernetes.io/name: {{ $namePrefix }}
+    app.kubernetes.io/component: worker
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $wkDisk) | indent 6 }}
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $namePrefix }}
+        app.kubernetes.io/component: worker
+        harvesterhci.io/rke2-role: worker
+    spec:
+      hostname: {{ $vmName }}
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: {{ $namePrefix }}
+            app.kubernetes.io/component: worker
+      domain:
+        cpu:
+          cores: {{ $wkCPU }}
+        resources:
+          limits:
+            memory: {{ $wkMem }}
+            cpu: {{ $wkCPU }}
+          requests:
+            memory: {{ $wkMem }}
+            cpu: {{ $wkCPU }}
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+      networks:
+      - name: primary
+        multus:
+          networkName: {{ $vmNetwork }}
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: {{ $pvcName }}
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: {{ $cloudConfig }}
+{{ end }}

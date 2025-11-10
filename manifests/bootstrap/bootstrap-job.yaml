@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rke2-bootstrap
+  namespace: rke2
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      serviceAccountName: rke2-bootstrap
+      restartPolicy: OnFailure
+      containers:
+        - name: fetch-kubeconfig
+          image: docker.io/library/alpine:3.20
+          securityContext:
+            runAsUser: 0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              apk add --no-cache curl openssh-client netcat-openbsd kubectl >/tmp/apk.log
+
+              until CP_IP=$(kubectl -n rke2 get vmi -l app.kubernetes.io/component=controlplane \
+                -o jsonpath='{range .items[?(@.status.interfaces[0].ipAddress!="")]}{.status.interfaces[0].ipAddress}{"\n"}{end}' | head -n1) \
+                && [ -n "${CP_IP}" ]; do
+                echo "Waiting for control-plane VM IP..."
+                sleep 5
+              done
+
+              until kubectl -n rke2 get vmi -l app.kubernetes.io/component=controlplane \
+                -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' | grep -q .; do
+                echo "Waiting for control-plane VMI to reach Running state..."
+                sleep 5
+              done
+
+              until nc -zvw3 ${CP_IP} 22; do
+                echo "Waiting for SSH on ${CP_IP}..."
+                sleep 5
+              done
+
+              ssh -i /ssh/id_ed25519 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+                rocky@${CP_IP} 'sudo cat /etc/rancher/rke2/rke2.yaml' > /tmp/kubeconfig
+
+              kubectl create secret generic rke2-kubeconfig \
+                --from-file=kubeconfig=/tmp/kubeconfig \
+                -n rke2 --dry-run=client -o yaml | kubectl apply -f -
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /ssh
+              readOnly: true
+      volumes:
+        - name: ssh-key
+          secret:
+            secretName: rke2-bootstrap-sshkey
+            defaultMode: 0600

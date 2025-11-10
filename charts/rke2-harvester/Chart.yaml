@@ -1,0 +1,10 @@
+apiVersion: v2
+name: rke2-harvester
+description: Deploy an RKE2 cluster on top of Harvester using Harvester’s VM CRDs
+type: application
+version: 0.1.0
+appVersion: "1.29"
+home: https://github.com/your‑org/rke2_harvester
+maintainers:
+  - name: Lumo
+    email: lumo@proton.me

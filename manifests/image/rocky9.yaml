@@ -1,0 +1,11 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineImage
+metadata:
+  name: rocky-9-cloudimg
+  namespace: harvester-public
+spec:
+  displayName: Rocky Linux 9 Cloud Image
+  backend: backingimage
+  sourceType: download
+  url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2
+  # Harvester will import the image the first time this manifest is applied.

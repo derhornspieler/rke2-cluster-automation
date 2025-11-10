@@ -1,0 +1,334 @@
+---
+# Source: rke2-harvester/templates/configmap.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rke2-rke2-harvester-cloud-config
+  namespace: rke2
+type: Opaque
+stringData:
+  userdata: |
+    #cloud-config
+    package_update: true
+    package_upgrade: true
+    packages:
+      - qemu-guest-agent
+      - cloud-utils-growpart
+    users:
+      - name: rocky
+        sudo: "ALL=(ALL) NOPASSWD:ALL"
+        groups: [wheel]
+        shell: /bin/bash
+        ssh_authorized_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK6LbWP3r925P5b+vFcbldXIppYkWgOsqtG6KBINXSEp jruds@ag-mbp.local"
+        lock_passwd: false
+    write_files:
+      - path: /etc/rancher/rke2/config.yaml
+        owner: root:root
+        permissions: "0644"
+        content: |
+          disable:
+            - rke2-snapshot-controller
+            - rke2-snapshot-controller-crd
+            - rke2-snapshot-validation-webhook
+          node-label:
+            - harvesterhci.io/managed=true
+          token: "YCWf9e6tKSzD$vp0pd1jt&Mm2aBDKFWTczA#S$f!FMCNww#"
+          cni:
+            - canal
+          cloud-provider-name: harvester
+    chpasswd:
+      list: |
+        rocky:rocky2025
+      expire: false
+    runcmd:
+      - systemctl enable --now qemu-guest-agent.service
+      - |
+        set -euo pipefail
+        INSTALL_TYPE="server"
+        SERVICE="rke2-server"
+        if hostname | grep -q -- "-wk-"; then
+          INSTALL_TYPE="agent"
+          SERVICE="rke2-agent"
+        fi
+        curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=${INSTALL_TYPE} sh -
+        systemctl enable ${SERVICE}.service
+        systemctl start ${SERVICE}.service
+---
+# Source: rke2-harvester/templates/virtualmachines.yaml
+# ------------------------------------------------------------------
+# Control‑plane VirtualMachines
+# ---------------------------------------------------------------------
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rke2-cp-1
+  namespace: rke2
+  labels:
+    app.kubernetes.io/name: rke2
+    app.kubernetes.io/component: controlplane
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+      [{"metadata":{"annotations":{"harvesterhci.io/imageId":"harvester-public/rocky-9-cloudimg"},"name":"rke2-cp-1-rootdisk"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"100Gi"}},"storageClassName":"longhorn-rocky-9-cloudimg","volumeMode":"Block"}}]
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rke2
+        app.kubernetes.io/component: controlplane
+        harvesterhci.io/rke2-role: controlplane
+    spec:
+      hostname: rke2-cp-1
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: rke2
+            app.kubernetes.io/component: controlplane
+      domain:
+        cpu:
+          cores: 2
+        resources:
+          limits:
+            memory: 4096Mi
+            cpu: 2
+          requests:
+            memory: 4096Mi
+            cpu: 2
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+      networks:
+      - name: primary
+        multus:
+          networkName: hvst-mgmt/vlan2003
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: rke2-cp-1-rootdisk
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: rke2-rke2-harvester-cloud-config
+---
+# Source: rke2-harvester/templates/virtualmachines.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rke2-cp-2
+  namespace: rke2
+  labels:
+    app.kubernetes.io/name: rke2
+    app.kubernetes.io/component: controlplane
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+      [{"metadata":{"annotations":{"harvesterhci.io/imageId":"harvester-public/rocky-9-cloudimg"},"name":"rke2-cp-2-rootdisk"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"100Gi"}},"storageClassName":"longhorn-rocky-9-cloudimg","volumeMode":"Block"}}]
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rke2
+        app.kubernetes.io/component: controlplane
+        harvesterhci.io/rke2-role: controlplane
+    spec:
+      hostname: rke2-cp-2
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: rke2
+            app.kubernetes.io/component: controlplane
+      domain:
+        cpu:
+          cores: 2
+        resources:
+          limits:
+            memory: 4096Mi
+            cpu: 2
+          requests:
+            memory: 4096Mi
+            cpu: 2
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+      networks:
+      - name: primary
+        multus:
+          networkName: hvst-mgmt/vlan2003
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: rke2-cp-2-rootdisk
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: rke2-rke2-harvester-cloud-config
+---
+# Source: rke2-harvester/templates/virtualmachines.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rke2-cp-3
+  namespace: rke2
+  labels:
+    app.kubernetes.io/name: rke2
+    app.kubernetes.io/component: controlplane
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+      [{"metadata":{"annotations":{"harvesterhci.io/imageId":"harvester-public/rocky-9-cloudimg"},"name":"rke2-cp-3-rootdisk"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"100Gi"}},"storageClassName":"longhorn-rocky-9-cloudimg","volumeMode":"Block"}}]
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rke2
+        app.kubernetes.io/component: controlplane
+        harvesterhci.io/rke2-role: controlplane
+    spec:
+      hostname: rke2-cp-3
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: rke2
+            app.kubernetes.io/component: controlplane
+      domain:
+        cpu:
+          cores: 2
+        resources:
+          limits:
+            memory: 4096Mi
+            cpu: 2
+          requests:
+            memory: 4096Mi
+            cpu: 2
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+      networks:
+      - name: primary
+        multus:
+          networkName: hvst-mgmt/vlan2003
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: rke2-cp-3-rootdisk
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: rke2-rke2-harvester-cloud-config
+
+
+# ------------------------------------------------------------------
+# Worker VirtualMachines
+# ------------------------------------------------------------------
+---
+# Source: rke2-harvester/templates/vm-templates.yaml
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplate
+metadata:
+  name: rke2-rke2-harvester-controlplane-template
+  namespace: rke2
+spec:
+  description: RKE2 control-plane VM for Harvester
+---
+# Source: rke2-harvester/templates/vm-templates.yaml
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplateVersion
+metadata:
+  name: rke2-rke2-harvester-controlplane-version
+  namespace: rke2
+  annotations:
+    harvesterhci.io/default-userdata-secret: rke2-rke2-harvester-cloud-config
+spec:
+  templateId: rke2/rke2-rke2-harvester-controlplane-template
+  vm:
+    metadata:
+      annotations:
+        harvesterhci.io/volumeClaimTemplates: |-
+          [{"metadata":{"annotations":{"harvesterhci.io/imageId":"harvester-public/rocky-9-cloudimg"},"name":"pvc-rootdisk"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"30Gi"}},"storageClassName":"longhorn-rocky-9-cloudimg","volumeMode":"Block"}}]
+    spec:
+      runStrategy: Always
+      template:
+        spec:
+          evictionStrategy: LiveMigrateIfPossible
+          domain:
+            cpu:
+              cores: 2
+            resources:
+              limits:
+                memory: 4096Mi
+                cpu: 2
+              requests:
+                memory: 4096Mi
+                cpu: 2
+            devices:
+              autoattachPodInterface: false
+              disks:
+              - name: rootdisk
+                bootOrder: 1
+                disk:
+                  bus: virtio
+              - name: cloudinitdisk
+                disk:
+                  bus: virtio
+              interfaces:
+              - name: primary
+                bridge: {}
+                model: virtio
+          networks:
+          - name: primary
+            multus:
+              networkName: hvst-mgmt/vlan2003
+          volumes:
+          - name: rootdisk
+            persistentVolumeClaim:
+              claimName: pvc-rootdisk
+          - name: cloudinitdisk
+            cloudInitNoCloud:
+              secretRef:
+                name: rke2-rke2-harvester-cloud-config

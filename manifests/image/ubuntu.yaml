@@ -1,0 +1,11 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineImage
+metadata:
+  name: ubuntu-22.04-cloudimg
+  namespace: harvester-public
+spec:
+  displayName: Ubuntu 22.04 Cloud Image
+  backend: backingimage
+  sourceType: download
+  url: https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img
+  # Harvester will import the image the first time this manifest is applied.
