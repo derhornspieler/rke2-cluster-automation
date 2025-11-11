@@ -1,0 +1,11 @@
+/manifests/bootstrap/ssh-key-secret.yaml
+/.vscode/
+.DS_Store
+/.idea/
+*.iml
+/.env
+/.env.local
+/credentials.yaml
+/credentials.local.yaml
+/custom_values.yaml
+rke2.kubeconfig

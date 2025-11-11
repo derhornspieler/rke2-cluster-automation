@@ -33,6 +33,7 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ $namePrefix }}
     app.kubernetes.io/component: controlplane
+    harvesterhci.io/vmName: {{ $vmName }}
   annotations:
     harvesterhci.io/volumeClaimTemplates: |-
 {{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $cpDisk) | indent 6 }}
@@ -44,6 +45,7 @@ spec:
         app.kubernetes.io/name: {{ $namePrefix }}
         app.kubernetes.io/component: controlplane
         harvesterhci.io/rke2-role: controlplane
+        harvesterhci.io/vmName: {{ $vmName }}
     spec:
       hostname: {{ $vmName }}
       evictionStrategy: LiveMigrateIfPossible
@@ -109,6 +111,7 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ $namePrefix }}
     app.kubernetes.io/component: worker
+    harvesterhci.io/vmName: {{ $vmName }}
   annotations:
     harvesterhci.io/volumeClaimTemplates: |-
 {{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $wkDisk) | indent 6 }}
@@ -120,6 +123,7 @@ spec:
         app.kubernetes.io/name: {{ $namePrefix }}
         app.kubernetes.io/component: worker
         harvesterhci.io/rke2-role: worker
+        harvesterhci.io/vmName: {{ $vmName }}
     spec:
       hostname: {{ $vmName }}
       evictionStrategy: LiveMigrateIfPossible

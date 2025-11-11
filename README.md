@@ -15,11 +15,26 @@ This repository contains Kubernetes manifests and a small Helm chart that let yo
 | ---- | ------- |
 | `manifests/image/` | Harvester `VirtualMachineImage` objects (Ubuntu, Rocky). Apply once to seed the image catalog. |
 | `manifests/network/` | Multus `NetworkAttachmentDefinition` objects plus optional DHCP `IPPool` (ships VLAN 2003 + VLAN 1003 examples). |
-| `manifests/rke2-config/` | Cloud-init `Secret` that stores the shared RKE2 configuration (token, CNI, runcmd). |
-| `manifests/vm-templates/` | Harvester `VirtualMachineTemplate` + `VirtualMachineTemplateVersion` definitions for control-plane and worker nodes (anchored to the shared cloud-init secret and networks). |
+| `manifests/rke2-config/` | Cloud-init `Secret` for the pure `kubectl apply` workflow. The Helm chart renders the same data from `values.yaml`, so Helm users can skip these manifests. |
+| `manifests/vm-templates/` | Harvester `VirtualMachineTemplate` + `VirtualMachineTemplateVersion` definitions for the manifest-only workflow (Helm renders these objects on the fly). |
 | `manifests/bootstrap/` | Job that copies the kubeconfig off the first control-plane VM into a Secret once the VM is reachable. |
 | `charts/rke2-harvester/` | Helm chart that parameterizes VM templates, emits the desired number of `VirtualMachine` objects, and wires in shared config/secrets. |
 | `.gitlab-ci.yml` | Optional CI pipeline (lint → deploy → verify) for GitOps style rollouts. |
+
+## What Helm Manages vs. Manual Prep
+
+| Component | Managed by Helm? | Notes |
+| --------- | ---------------- | ----- |
+| `rke2` namespace | ⚠️ Partially | All chart resources render into the `rke2` namespace. Create it once with `kubectl create namespace rke2` or rely on `helm upgrade --install ... --create-namespace` the first time. |
+| Cloud-config Secret (`<release>-rke2-harvester-cloud-config`) | ✅ Yes | Generated from the values file; you no longer need to apply `manifests/rke2-config` when deploying with Helm. |
+| `VirtualMachineTemplate` + `VirtualMachineTemplateVersion` | ✅ Yes | Helm renders per-role templates so Harvester can clone VMs consistently. |
+| `kubevirt.io/VirtualMachine` objects | ✅ Yes | Replica counts, sizing, and labels are produced directly from your values file. |
+| Harvester LoadBalancer + IPPool | ✅ Optional | Created only when `loadBalancer.enabled: true` and `loadBalancer.vip/subnet/gateway` are set. |
+| `VirtualMachineImage` objects | ❌ Manual | Apply the YAMLs under `manifests/image/` so Harvester can download the cloud images once per cluster. |
+| Workload networks + DHCP pools | ❌ Manual | Apply `manifests/network/*.yaml` to create Multus NADs and (optionally) DHCP IPPools. Update the manifests if you use a different VLAN/bridge. |
+| Bootstrap SSH Secret, RBAC, and Job | ❌ Manual | Lives under `manifests/bootstrap/`. Helm does not embed private keys, so you must create these objects yourself before running the bootstrap job. |
+
+The split above answers the "one command" question: Helm is responsible for every object tied to the RKE2 VMs themselves (templates, secrets, VMs, optional VIP). Cluster-scoped prerequisites such as images, Multus networks, and your private SSH material remain manual because they typically require elevated privileges and only need to be seeded once per Harvester installation. After those prerequisites exist, standing up or scaling the cluster really is a single `helm upgrade --install ...` invocation.
 
 ## Prepare Configuration
 
@@ -27,15 +42,26 @@ This repository contains Kubernetes manifests and a small Helm chart that let yo
    ```bash
    kubectl create namespace rke2
    ```
-   Re-run safe if it already exists.
+   Re-run safe if it already exists (or rely on `helm ... --create-namespace` the first time).
 
-2. **RKE2 cloud-init secret:** edit `manifests/rke2-config/configmap.yaml` (now a Secret) and replace `REPLACE_WITH_RKE2_TOKEN` plus any other settings you need, then apply:
+2. **Cloud images:** choose which OS images you will boot (Ubuntu or Rocky). Apply each manifest after confirming the URL is still valid:
    ```bash
-   kubectl apply -f manifests/rke2-config/configmap.yaml
+   kubectl apply -f manifests/image/ubuntu.yaml
+   kubectl apply -f manifests/image/rocky9.yaml
+   kubectl -n harvester-public get virtualmachineimage
    ```
-   The included `runcmd` detects workers by the `-wk-` substring in the VM hostname and installs the RKE2 agent there; every other VM installs the server. Adjust the logic if you change your VM naming scheme.
+   Wait for the `Ready` condition before proceeding. Harvester only downloads each image once, so this is a one-time cluster prep step.
 
-3. **Bootstrap SSH key:** create and apply the secret *before* running the bootstrap job. It must contain the private key that matches `values.yaml#ssh.publicKey`. You can edit `manifests/bootstrap/ssh-key-secret.yaml` (it includes an inline `stringData` placeholder) and apply it:
+3. **VM network + optional DHCP IP pool:** apply the bundled Multus definitions (Harvester treats NADs with the `network.harvesterhci.io/*` labels as VM networks) and, if you need managed DHCP, the IPPool for VLAN 2003:
+   ```bash
+   kubectl apply -f manifests/network/networks.yaml
+   kubectl apply -f manifests/network/vmnet-vlan2003-ippool.yaml   # requires Harvester DHCP addon
+   ```
+   These manifests create NADs bound to Harvester’s built-in `mgmt` cluster network/bridge (`mgmt-br`). If your hosts use a different cluster network, change the `network.harvesterhci.io/clusternetwork` label and the `"bridge"` value in `manifests/network/networks.yaml` before applying. The bundled DHCP pool now excludes `192.168.10.5` so that the default control-plane VIP stays reserved; adjust the `exclude` list if you select a different VIP.
+
+4. **Control-plane VIP via Harvester LoadBalancer (optional):** set `loadBalancer.enabled: true` plus `loadBalancer.vip`, `loadBalancer.subnet`, `loadBalancer.gateway`, and (optionally) `loadBalancer.namespace` to have Helm create a Harvester `IPPool` + `LoadBalancer`. Cloud-init writes `server: https://<vip>:9345` into `/etc/rancher/rke2/config.yaml` so every subsequent control-plane node (and any agents) join through the VIP. The first control-plane VM automatically removes that line before bootstrapping etcd, matching the staged workflow recommended by the RKE2 docs. The generated LoadBalancer selects backends via the `harvesterhci.io/vmName` label, so scaling `replicaCounts.controlPlane` automatically updates the VIP endpoints.
+
+5. **Bootstrap SSH key + RBAC:** create and apply the secret *before* running the bootstrap job. It must contain the private key that matches `values.yaml#ssh.publicKey`. You can edit `manifests/bootstrap/ssh-key-secret.yaml` (it includes an inline `stringData` placeholder) and apply it:
    ```bash
    kubectl apply -f manifests/bootstrap/ssh-key-secret.yaml
    kubectl apply -f manifests/bootstrap/bootstrap-rbac.yaml
@@ -47,32 +73,9 @@ This repository contains Kubernetes manifests and a small Helm chart that let yo
      --type=Opaque
    ```
 
-3. **Cloud images:** choose which OS images you will boot (Ubuntu or Rocky). Apply each manifest after confirming the URL is still valid:
-   ```bash
-   kubectl apply -f manifests/image/ubuntu.yaml
-   kubectl apply -f manifests/image/rocky9.yaml
-   kubectl -n harvester-system get virtualmachineimage
-   ```
-   Wait for the `Ready` condition before proceeding.
+> 📝 Still using the manifest-only workflow? Apply `manifests/rke2-config/configmap.yaml` and `manifests/vm-templates/`, then manage your own `VirtualMachine` CRs with `kubectl apply`. Helm users can skip those directories because the chart creates the cloud-config secret, VM templates, and the `kubevirt.io/VirtualMachine` objects for you.
 
-
-4. **VM network + optional DHCP IP pool:** apply the bundled Multus definitions (Harvester treats NADs with the `network.harvesterhci.io/*` labels as VM networks) and, if you need managed DHCP, the IPPool for VLAN 2003:
-   ```bash
-   kubectl apply -f manifests/network/networks.yaml
-   kubectl apply -f manifests/network/vmnet-vlan2003-ippool.yaml   # requires Harvester DHCP addon
-   ```
-   These manifests create NADs bound to Harvester’s built-in `mgmt` cluster network/bridge (`mgmt-br`). If your hosts use a different cluster network, change the `network.harvesterhci.io/clusternetwork` label and the `"bridge"` value in `manifests/network/networks.yaml` before applying. The chart currently binds every VM nic to the VLAN 2003 network (with DHCP supplied by `vmnet-vlan2003-ippool.yaml`); VLAN 1003 remains in the repo as an example if you need to introduce an out-of-band network later.
-
-5. **VirtualMachine templates + versions (kubectl workflow):** the manifests under `manifests/vm-templates/` now register both the `VirtualMachineTemplate` shell and the `VirtualMachineTemplateVersion` that contains the kubevirt spec (cloud-init secret, networks, disk layouts). Tweak the CPU/memory/storage or NAD names if your environment differs, then apply the directory:
-   ```bash
-   kubectl apply -f manifests/vm-templates/
-   ```
-
-## Deployment Options
-
-### Option A – Render with Helm, Apply with kubectl
-
-This keeps your deployment as pure manifests but lets Helm handle templating:
+## Deploy with Helm
 
 1. Copy `charts/rke2-harvester/values.yaml` to a working file (e.g., `my-values.yaml`) and set:
    - `image.namespace` / `image.name` to the Harvester `VirtualMachineImage` you imported (default is `harvester-public/rocky-9-cloudimg`).
@@ -80,35 +83,26 @@ This keeps your deployment as pure manifests but lets Helm handle templating:
    - `storage.*` for disk policy. Leave `storage.className` empty to let Harvester apply the image-specific backing StorageClass (recommended). `storage.size` remains the fallback, while `storage.controlPlaneSize` / `storage.workerSize` let you size each role separately (defaults: 30 Gi for control-plane, 150 Gi for workers).
    - `replicaCounts.*` plus `resources.controlPlane` / `.worker` to match the node counts and sizing you expect (workers default to `0` so you can bring them online later, e.g., after Rancher Manager is deployed).
    - `networks.vm.*` to the namespace/name of the Multus `NetworkAttachmentDefinition` the VMs should attach to (defaults to VLAN 2003).
+   - `loadBalancer.*` if you want the chart to stand up the Harvester LoadBalancer/VIP for you.
+   - `tlsSANs` to inject additional API/VIP DNS names or IPs into the generated RKE2 certificate bundle (the VIP is added automatically when enabled).
    - `ssh.publicKey`, optional `ssh.password` (if you want console login), `rke2.token`, `rke2.version`, etc.
-2. Render the chart and apply:
+   Store your overrides in a dedicated file (for example `custom_values.yaml`) so you can keep secrets out of version control. It is common to keep two variants: one that sets `replicaCounts.controlPlane: 1` for the very first bootstrap, and another with your steady-state replica counts for subsequent upgrades.
+2. Bootstrap with a single control-plane VM first by setting `replicaCounts.controlPlane: 1`, then install or upgrade the release:
    ```bash
-   helm template rke2 charts/rke2-harvester \
-     -f my-values.yaml \
-     --namespace rke2 \
-     > rendered.yaml
-
-   kubectl apply -f rendered.yaml
+   helm upgrade --install rke2 charts/rke2-harvester \
+     -n rke2 --create-namespace \
+     -f my-values.yaml
    ```
-   The render includes the Harvester templates/template-versions plus the `kubevirt.io/v1` `VirtualMachine` CRs; once applied, Harvester uses the `harvesterhci.io/volumeClaimTemplates` annotation on each VM to create the backing PVCs from your selected image and boot every VM.
+   Wait for the VM to reach `Running`, confirm RKE2 is healthy, and (if you enabled the VIP) verify the Harvester load balancer shows `Ready`.
 
- ### Option B – Manage as a Helm Release
+3. Scale to your desired size by editing `replicaCounts.controlPlane` / `.worker` in the same values file and re-running the identical `helm upgrade --install` command. Helm reconciles the VM set while preserving existing PVCs.
 
-If you prefer Helm to keep track of revisions (and to make scaling declarative), install the chart directly:
-
-```bash
-helm upgrade --install rke2 charts/rke2-harvester \
-  -n rke2 --create-namespace \
-  -f my-values.yaml
-```
-
-Helm stores release state so `helm upgrade` automatically adds/removes `VirtualMachine` objects when you change `replicaCounts`.
-
-Regardless of whether you use Option A or Option B, you still need to:
+Regardless of the replica count, you still need to:
 
 - Apply the bootstrap SSH Secret (`kubectl apply -f manifests/bootstrap/ssh-key-secret.yaml` or create it manually).
 - Apply the bootstrap RBAC (`kubectl apply -f manifests/bootstrap/bootstrap-rbac.yaml`).
 - Run the bootstrap job after the first control-plane VM is Running to extract the kubeconfig.
+- When using the built-in VIP, always start with `replicaCounts.controlPlane: 1`, validate the first node, then re-run `helm upgrade --install ...` with your target control-plane count so the remaining nodes join through the VIP.
 
 ## Bootstrap the RKE2 Kubeconfig
 
@@ -136,10 +130,10 @@ The job can be rerun whenever you rebuild the VMs (it simply updates the Secret)
 
 ## Cleanup
 
-Remove the Helm release (or delete the rendered manifests) and clean up supporting objects:
+Remove the Helm release and clean up supporting objects:
 
 ```bash
-helm uninstall rke2 -n rke2        # or kubectl delete -f rendered.yaml
+helm uninstall rke2 -n rke2
 kubectl delete namespace rke2
 kubectl delete virtualmachineimage rocky-9-cloudimg -n harvester-system
 kubectl delete virtualmachineimage ubuntu-22.04-cloudimg -n harvester-system

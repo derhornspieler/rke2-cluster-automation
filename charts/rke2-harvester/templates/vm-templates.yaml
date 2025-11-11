@@ -10,14 +10,15 @@
 {{- $storageSize := .Values.storage.size -}}
 {{- $wkCount := .Values.replicaCounts.worker | int -}}
 {{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
+{{- $releaseRevision := default 1 .Release.Revision -}}
 {{- $roles := list
   (dict "key" "controlplane" "description" "RKE2 control-plane VM for Harvester" "cpu" (int (default 2 .Values.resources.controlPlane.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi))))
   (dict "key" "worker" "description" "RKE2 worker VM for Harvester" "cpu" (int (default 2 .Values.resources.worker.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.worker.memoryMi))))
 -}}
 {{- range $role := $roles }}
 {{- if or (ne $role.key "worker") (gt $wkCount 0) }}
-{{- $templateName := printf "%s-%s-template" $fullname $role.key -}}
-{{- $versionName := printf "%s-%s-version" $fullname $role.key -}}
+{{- $templateName := printf "%s-%s-template" $fullname $role.key | trunc 63 | trimSuffix "-" -}}
+{{- $versionName := printf "%s-%s-version-r%d" $fullname $role.key $releaseRevision | trunc 63 | trimSuffix "-" -}}
 ---
 apiVersion: harvesterhci.io/v1beta1
 kind: VirtualMachineTemplate

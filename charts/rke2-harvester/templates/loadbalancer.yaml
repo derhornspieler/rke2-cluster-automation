@@ -1,0 +1,51 @@
+{{- if and .Values.loadBalancer.enabled .Values.loadBalancer.vip }}
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $cpCount := int .Values.replicaCounts.controlPlane -}}
+{{- $poolName := printf "%s-lb-pool" (include "rke2-harvester.fullname" .) -}}
+---
+apiVersion: loadbalancer.harvesterhci.io/v1beta1
+kind: IPPool
+metadata:
+  name: {{ $poolName }}
+spec:
+  ranges:
+    - gateway: {{ .Values.loadBalancer.gateway }}
+      rangeStart: {{ .Values.loadBalancer.vip }}
+      rangeEnd: {{ .Values.loadBalancer.vip }}
+      subnet: {{ .Values.loadBalancer.subnet }}
+  selector: {}
+---
+apiVersion: loadbalancer.harvesterhci.io/v1beta1
+kind: LoadBalancer
+metadata:
+  name: {{ include "rke2-harvester.fullname" . }}-lb
+  namespace: {{ default "default" .Values.loadBalancer.namespace }}
+spec:
+  healthCheck:
+    failureThreshold: 2
+    port: 6443
+    successThreshold: 3
+    timeoutSeconds: 5
+    periodSeconds: 5
+  ipam: pool
+  ipPool: {{ $poolName }}
+  listeners:
+    - name: k8s-api
+      port: 6443
+      protocol: TCP
+      backendPort: 6443
+    - name: rke2-supervisor
+      port: 9345
+      protocol: TCP
+      backendPort: 9345
+    - name: ingress
+      port: 443
+      protocol: TCP
+      backendPort: 443
+  workloadType: vm
+  backendServerSelector:
+    harvesterhci.io/vmName:
+{{- range $i := until $cpCount }}
+      - {{ printf "%s-cp-%d" $namePrefix (add $i 1) }}
+{{- end }}
+{{- end }}

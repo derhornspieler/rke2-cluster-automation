@@ -25,6 +25,16 @@ networks:
     namespace: hvst-mgmt
     name: vlan2003                   # Workload VM network (VLAN 2003)
 
+loadBalancer:
+  enabled: false
+  namespace: default
+  vip: ""
+  subnet: ""
+  gateway: ""
+
+tlsSANs:
+  - internal-vip.local
+
 resources:
   controlPlane:
     cpuCores: 2
@@ -35,9 +45,9 @@ resources:
 
 ssh:
   user: rocky                     # user that cloud‑init will create
-  publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK6LbWP3r925P5b+vFcbldXIppYkWgOsqtG6KBINXSEp jruds@ag-mbp.local"  # fill with your SSH public key (optional)
+  publicKey: "ssh-ed25519 "  # fill with your SSH public key (optional)
 
 rke2:
-  token: "YCWf9e6tKSzD$vp0pd1jt&Mm2aBDKFWTczA#S$f!FMCNww#"  # will be filled from secret rke2-token
+  token: ""  # will be filled from secret rke2-token
   version: "v1.33.5+rke2r1"        # RKE2 version you want to run
   cni: "canal"                     # or calico, multus, etc.

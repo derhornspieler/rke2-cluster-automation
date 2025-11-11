@@ -53,6 +53,22 @@ write_files:
       cni:
         - {{ .Values.rke2.cni }}
       cloud-provider-name: harvester
+{{- if and .Values.loadBalancer.enabled .Values.loadBalancer.vip }}
+      server: https://{{ .Values.loadBalancer.vip }}:9345
+{{- end }}
+{{- $hasVip := and .Values.loadBalancer.enabled .Values.loadBalancer.vip }}
+{{- if or $hasVip (gt (len .Values.tlsSANs) 0) }}
+      tls-san:
+{{- if $hasVip }}
+        - {{ .Values.loadBalancer.vip }}
+{{- end }}
+{{- range .Values.tlsSANs }}
+        - {{ . }}
+{{- end }}
+{{- end }}
+{{- range .Values.tlsSANs }}
+        - {{ . }}
+{{- end }}
 chpasswd:
   list: |
     {{ .Values.ssh.user }}:{{ .Values.ssh.password | default "rocky2025" }}
@@ -61,9 +77,15 @@ runcmd:
   - systemctl enable --now qemu-guest-agent.service
   - |
     set -euo pipefail
+    HOSTNAME="$(hostname)"
     INSTALL_TYPE="server"
     SERVICE="rke2-server"
-    if hostname | grep -q -- "-wk-"; then
+{{- if $hasVip }}
+    if echo "${HOSTNAME}" | grep -q -- "-cp-1$"; then
+      sed -i '/^server:/d' /etc/rancher/rke2/config.yaml
+    fi
+{{- end }}
+    if echo "${HOSTNAME}" | grep -q -- "-wk-"; then
       INSTALL_TYPE="agent"
       SERVICE="rke2-agent"
     fi
