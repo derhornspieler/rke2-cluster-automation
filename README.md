@@ -83,7 +83,7 @@ The split above answers the "one command" question: Helm is responsible for ever
    - `storage.*` for disk policy. Leave `storage.className` empty to let Harvester apply the image-specific backing StorageClass (recommended). `storage.size` remains the fallback, while `storage.controlPlaneSize` / `storage.workerSize` let you size each role separately (defaults: 30 Gi for control-plane, 150 Gi for workers).
    - `replicaCounts.*` plus `resources.controlPlane` / `.worker` to match the node counts and sizing you expect (workers default to `0` so you can bring them online later, e.g., after Rancher Manager is deployed).
    - `networks.vm.*` to the namespace/name of the Multus `NetworkAttachmentDefinition` the VMs should attach to (defaults to VLAN 2003).
-   - `loadBalancer.*` if you want the chart to stand up the Harvester LoadBalancer/VIP for you.
+   - `loadBalancer.*` if you want the chart to stand up the Harvester LoadBalancer/VIP for you. `loadBalancer.network` defaults to the same `namespace/name` you configure under `networks.vm`, but you can override it if the VIP lives on a different Harvester network or VLAN.
    - `tlsSANs` to inject additional API/VIP DNS names or IPs into the generated RKE2 certificate bundle (the VIP is added automatically when enabled).
    - `ssh.publicKey`, optional `ssh.password` (if you want console login), `rke2.token`, `rke2.version`, etc.
    Store your overrides in a dedicated file (for example `custom_values.yaml`) so you can keep secrets out of version control. It is common to keep two variants: one that sets `replicaCounts.controlPlane: 1` for the very first bootstrap, and another with your steady-state replica counts for subsequent upgrades.
