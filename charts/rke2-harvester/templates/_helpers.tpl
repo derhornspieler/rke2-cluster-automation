@@ -66,6 +66,7 @@ ethernets:
 {{- $namespace := default "kube-system" $vip.namespace -}}
 {{- $defaultSA := printf "%s-kube-vip" (include "rke2-harvester.fullname" .) -}}
 {{- $serviceAccount := default $defaultSA $vip.serviceAccountName -}}
+{{- $cidr := $vip.cidr | default "" -}}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -99,6 +100,10 @@ spec:
           value: {{ $vip.address | quote }}
         - name: vip_leaderelection
           value: "true"
+{{- if $cidr }}
+        - name: vip_cidr
+          value: {{ printf "%v" $cidr | quote }}
+{{- end }}
       securityContext:
         capabilities:
           add:
