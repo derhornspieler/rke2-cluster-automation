@@ -2,8 +2,6 @@
 {{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
 {{- $cpCount := int .Values.replicaCounts.controlPlane -}}
 {{- $poolName := printf "%s-lb-pool" (include "rke2-harvester.fullname" .) -}}
-{{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
-{{- $lbNetwork := default $vmNetwork .Values.loadBalancer.network -}}
 ---
 apiVersion: loadbalancer.harvesterhci.io/v1beta1
 kind: IPPool
@@ -15,16 +13,13 @@ spec:
       rangeStart: {{ .Values.loadBalancer.vip }}
       rangeEnd: {{ .Values.loadBalancer.vip }}
       subnet: {{ .Values.loadBalancer.subnet }}
-  selector:
-    network: {{ $lbNetwork }}
+  selector: {}
 ---
 apiVersion: loadbalancer.harvesterhci.io/v1beta1
 kind: LoadBalancer
 metadata:
   name: {{ include "rke2-harvester.fullname" . }}-lb
   namespace: {{ default "default" .Values.loadBalancer.namespace }}
-  annotations:
-    loadbalancer.harvesterhci.io/network: {{ $lbNetwork }}
 spec:
   healthCheck:
     failureThreshold: 2

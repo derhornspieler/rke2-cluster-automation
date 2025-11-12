@@ -29,7 +29,7 @@ This repository contains Kubernetes manifests and a small Helm chart that let yo
 | Cloud-config Secret (`<release>-rke2-harvester-cloud-config`) | ✅ Yes | Generated from the values file; you no longer need to apply `manifests/rke2-config` when deploying with Helm. |
 | `VirtualMachineTemplate` + `VirtualMachineTemplateVersion` | ✅ Yes | Helm renders per-role templates so Harvester can clone VMs consistently. |
 | `kubevirt.io/VirtualMachine` objects | ✅ Yes | Replica counts, sizing, and labels are produced directly from your values file. |
-| Harvester LoadBalancer + IPPool | ✅ Optional | Created only when `loadBalancer.enabled: true` and `loadBalancer.vip/subnet/gateway` are set. |
+| kube-vip static pod | ✅ Optional | Generated automatically when `kubeVip.enabled: true` so every control-plane VM writes the kube-vip manifest into `/var/lib/rancher/rke2/server/manifests/`. |
 | `VirtualMachineImage` objects | ❌ Manual | Apply the YAMLs under `manifests/image/` so Harvester can download the cloud images once per cluster. |
 | Workload networks + DHCP pools | ❌ Manual | Apply `manifests/network/*.yaml` to create Multus NADs and (optionally) DHCP IPPools. Update the manifests if you use a different VLAN/bridge. |
 | Bootstrap SSH Secret, RBAC, and Job | ❌ Manual | Lives under `manifests/bootstrap/`. Helm does not embed private keys, so you must create these objects yourself before running the bootstrap job. |
@@ -59,7 +59,7 @@ The split above answers the "one command" question: Helm is responsible for ever
    ```
    These manifests create NADs bound to Harvester’s built-in `mgmt` cluster network/bridge (`mgmt-br`). If your hosts use a different cluster network, change the `network.harvesterhci.io/clusternetwork` label and the `"bridge"` value in `manifests/network/networks.yaml` before applying. The bundled DHCP pool now excludes `192.168.10.5` so that the default control-plane VIP stays reserved; adjust the `exclude` list if you select a different VIP.
 
-4. **Control-plane VIP via Harvester LoadBalancer (optional):** set `loadBalancer.enabled: true` plus `loadBalancer.vip`, `loadBalancer.subnet`, `loadBalancer.gateway`, and (optionally) `loadBalancer.namespace` to have Helm create a Harvester `IPPool` + `LoadBalancer`. Cloud-init writes `server: https://<vip>:9345` into `/etc/rancher/rke2/config.yaml` so every subsequent control-plane node (and any agents) join through the VIP. The first control-plane VM automatically removes that line before bootstrapping etcd, matching the staged workflow recommended by the RKE2 docs. The generated LoadBalancer selects backends via the `harvesterhci.io/vmName` label, so scaling `replicaCounts.controlPlane` automatically updates the VIP endpoints.
+4. **Control-plane VIP via kube-vip (recommended):** pick an unused IP on the workload VLAN and reserve it (DHCP exclusion or static mapping). Set `kubeVip.enabled: true`, `kubeVip.address`, `kubeVip.interface`, and (optionally) `kubeVip.image` in your values file. During cloud-init every control-plane VM pulls the kube-vip image, renders the manifest into `/var/lib/rancher/rke2/server/manifests/kube-vip.yaml`, and RKE2 schedules it as a static pod once the kubelet starts. The first control-plane VM automatically removes the `server:` entry from `/etc/rancher/rke2/config.yaml` so it can bootstrap etcd, while subsequent control-plane nodes keep the endpoint and join through the VIP.
 
 5. **Bootstrap SSH key + RBAC:** create and apply the secret *before* running the bootstrap job. It must contain the private key that matches `values.yaml#ssh.publicKey`. You can edit `manifests/bootstrap/ssh-key-secret.yaml` (it includes an inline `stringData` placeholder) and apply it:
    ```bash
@@ -83,7 +83,8 @@ The split above answers the "one command" question: Helm is responsible for ever
    - `storage.*` for disk policy. Leave `storage.className` empty to let Harvester apply the image-specific backing StorageClass (recommended). `storage.size` remains the fallback, while `storage.controlPlaneSize` / `storage.workerSize` let you size each role separately (defaults: 30 Gi for control-plane, 150 Gi for workers).
    - `replicaCounts.*` plus `resources.controlPlane` / `.worker` to match the node counts and sizing you expect (workers default to `0` so you can bring them online later, e.g., after Rancher Manager is deployed).
    - `networks.vm.*` to the namespace/name of the Multus `NetworkAttachmentDefinition` the VMs should attach to (defaults to VLAN 2003).
-   - `loadBalancer.*` if you want the chart to stand up the Harvester LoadBalancer/VIP for you. `loadBalancer.network` defaults to the same `namespace/name` you configure under `networks.vm`, but you can override it if the VIP lives on a different Harvester network or VLAN.
+     If you need deterministic MACs for the control-plane nodes (so DHCP hands back the same IP), list them under `networks.vm.macAddresses.controlPlane` in the order Helm creates the VMs (`-cp-1`, `-cp-2`, ...). Workers can do the same via `networks.vm.macAddresses.worker` or simply rely on the default random values. Alternatively, populate `networks.vm.staticIPs.*` along with `networks.vm.prefix`, `.gateway`, and `.nameservers` to have the chart inject per-VM `networkData`. Each VM then boots with a netplan stanza (no DHCP dependency) and you can hand out exact addresses such as `controlPlane: [192.168.10.3, 192.168.10.4, 192.168.10.5]`.
+   - `kubeVip.*` to control the VIP automation. Set `kubeVip.address` to the reserved IP, `kubeVip.interface` to the NIC inside the guest (default `eth0`), `kubeVip.namespace` (defaults to `kube-system`), and adjust `kubeVip.image` if you need a different tag. When `kubeVip.rbac.create: true` (the default) the chart also provisions a matching ServiceAccount/ClusterRole/ClusterRoleBinding and the static manifest references that service account so leader election can update the `plndr-cp-lock` Lease without extra manual steps.
    - `tlsSANs` to inject additional API/VIP DNS names or IPs into the generated RKE2 certificate bundle (the VIP is added automatically when enabled).
    - `ssh.publicKey`, optional `ssh.password` (if you want console login), `rke2.token`, `rke2.version`, etc.
    Store your overrides in a dedicated file (for example `custom_values.yaml`) so you can keep secrets out of version control. It is common to keep two variants: one that sets `replicaCounts.controlPlane: 1` for the very first bootstrap, and another with your steady-state replica counts for subsequent upgrades.
@@ -93,7 +94,7 @@ The split above answers the "one command" question: Helm is responsible for ever
      -n rke2 --create-namespace \
      -f my-values.yaml
    ```
-   Wait for the VM to reach `Running`, confirm RKE2 is healthy, and (if you enabled the VIP) verify the Harvester load balancer shows `Ready`.
+   Wait for the VM to reach `Running`, confirm RKE2 is healthy, and (if you enabled the VIP) test `curl -k https://<vip>:6443/version` from a Harvester host to ensure kube-vip is answering.
 
 3. Scale to your desired size by editing `replicaCounts.controlPlane` / `.worker` in the same values file and re-running the identical `helm upgrade --install` command. Helm reconciles the VM set while preserving existing PVCs.
 
@@ -102,7 +103,7 @@ Regardless of the replica count, you still need to:
 - Apply the bootstrap SSH Secret (`kubectl apply -f manifests/bootstrap/ssh-key-secret.yaml` or create it manually).
 - Apply the bootstrap RBAC (`kubectl apply -f manifests/bootstrap/bootstrap-rbac.yaml`).
 - Run the bootstrap job after the first control-plane VM is Running to extract the kubeconfig.
-- When using the built-in VIP, always start with `replicaCounts.controlPlane: 1`, validate the first node, then re-run `helm upgrade --install ...` with your target control-plane count so the remaining nodes join through the VIP.
+- When using kube-vip, always start with `replicaCounts.controlPlane: 1`, validate the first node (it owns etcd bootstrapping), then re-run `helm upgrade --install ...` with your target control-plane count so the remaining nodes join through the VIP.
 
 ## Bootstrap the RKE2 Kubeconfig
 

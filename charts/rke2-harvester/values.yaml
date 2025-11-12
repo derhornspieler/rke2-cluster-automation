@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------
 replicaCounts:
   controlPlane: 3          # number of RKE2 control‑plane VMs
-  worker: 30               # number of RKE2 worker VMs
+  worker: 0            # number of RKE2 worker VMs
 
 image:
   namespace: harvester-public        # Namespace that holds the VirtualMachineImage
@@ -24,14 +24,35 @@ networks:
   vm:
     namespace: hvst-mgmt
     name: vlan2003                   # Workload VM network (VLAN 2003)
+    interface: eth0                  # Guest interface name used in networkData
+    prefix: 24                       # CIDR prefix length for static IPs
+    gateway: ""                      # Optional gateway inserted into networkData
+    nameservers: []                  # Optional DNS servers for static IPs
+    macAddresses:
+      controlPlane: []               # Optional list of MACs per control-plane VM
+      worker: []                     # Optional list of MACs per worker VM
+    staticIPs:
+      controlPlane: []               # Optional static IPv4 list per control-plane VM
+      worker: []                     # Optional static IPv4 list per worker VM
 
+# Legacy Harvester LoadBalancer values (unused when kubeVip.enabled=true)
 loadBalancer:
   enabled: false
   namespace: default
   vip: ""
   subnet: ""
   gateway: ""
-  network: ""                  # optional override for the Harvester network (defaults to networks.vm)
+  network: ""
+
+kubeVip:
+  enabled: true
+  namespace: kube-system
+  address: ""                        # Required when enabled
+  interface: eth0
+  image: ghcr.io/kube-vip/kube-vip:v0.8.8
+  serviceAccountName: kube-vip       # ServiceAccount used by the static pod
+  rbac:
+    create: true                     # Set false if you manage kube-vip RBAC yourself
 
 tlsSANs:
   - internal-vip.local
@@ -39,10 +60,10 @@ tlsSANs:
 resources:
   controlPlane:
     cpuCores: 2
-    memoryMi: 4096
+    memoryMi: 16386
   worker:
     cpuCores: 2
-    memoryMi: 4096
+    memoryMi: 16386
 
 ssh:
   user: rocky                     # user that cloud‑init will create

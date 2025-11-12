@@ -10,6 +10,14 @@
 {{- $cpDisk := .Values.storage.controlPlaneSize | default .Values.storage.size -}}
 {{- $wkDisk := .Values.storage.workerSize | default .Values.storage.size -}}
 {{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
+{{- $cpMacs := .Values.networks.vm.macAddresses.controlPlane | default (list) -}}
+{{- $wkMacs := .Values.networks.vm.macAddresses.worker | default (list) -}}
+{{- $cpIPs := .Values.networks.vm.staticIPs.controlPlane | default (list) -}}
+{{- $wkIPs := .Values.networks.vm.staticIPs.worker | default (list) -}}
+{{- $prefix := int (default 24 .Values.networks.vm.prefix) -}}
+{{- $gateway := .Values.networks.vm.gateway | default "" -}}
+{{- $dns := .Values.networks.vm.nameservers | default (list) -}}
+{{- $netInterface := .Values.networks.vm.interface | default "eth0" -}}
 {{- $cpCPU := int (default 2 .Values.resources.controlPlane.cpuCores) -}}
 {{- $cpMem := printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi)) -}}
 {{- $wkCPU := int (default 2 .Values.resources.worker.cpuCores) -}}
@@ -24,6 +32,8 @@
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $cpMacs "index" $i) -}}
+{{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $cpIPs "index" $i) -}}
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
@@ -81,6 +91,9 @@ spec:
           - name: primary
             bridge: {}
             model: virtio
+{{- if $macAddr }}
+            macAddress: {{ $macAddr }}
+{{- end }}
       networks:
       - name: primary
         multus:
@@ -93,6 +106,10 @@ spec:
         cloudInitNoCloud:
           secretRef:
             name: {{ $cloudConfig }}
+{{- if $staticIP }}
+          networkData: |
+{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface) | indent 12 }}
+{{- end }}
 {{ end }}
 
 # ------------------------------------------------------------------
@@ -102,6 +119,8 @@ spec:
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-wk-%d" $namePrefix $vmOrdinal -}}
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $wkMacs "index" $i) -}}
+{{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $wkIPs "index" $i) -}}
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
@@ -159,6 +178,9 @@ spec:
           - name: primary
             bridge: {}
             model: virtio
+{{- if $macAddr }}
+            macAddress: {{ $macAddr }}
+{{- end }}
       networks:
       - name: primary
         multus:
@@ -171,4 +193,8 @@ spec:
         cloudInitNoCloud:
           secretRef:
             name: {{ $cloudConfig }}
+{{- if $staticIP }}
+          networkData: |
+{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface) | indent 12 }}
+{{- end }}
 {{ end }}
