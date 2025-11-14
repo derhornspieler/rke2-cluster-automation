@@ -1,3 +1,7 @@
+# Optional override for the namespace where chart resources are created.
+# Leave empty to use the Helm release namespace passed via `-n/--namespace`.
+namespaceOverride: ""
+
 # ------------------------------------------------------------------
 # Global settings
 # ------------------------------------------------------------------
@@ -34,6 +38,16 @@ networks:
     staticIPs:
       controlPlane: []               # Optional static IPv4 list per control-plane VM
       worker: []                     # Optional static IPv4 list per worker VM
+  rancher:
+    enabled: false                  # Set true to attach a second interface dedicated to Rancher
+    namespace: ""                  # Namespace of the Rancher NetworkAttachmentDefinition
+    name: ""                       # Name of the Rancher NetworkAttachmentDefinition
+    interface: eth1                 # Guest interface name for the secondary NIC
+    prefix: 24                      # CIDR prefix for static IPs on the Rancher NIC
+    routes: []                      # Optional list of extra routes (to/24 via/scope) for the Rancher NIC
+    staticIPs:
+      controlPlane: []              # Static IPv4s for control-plane VMs on the Rancher NIC
+      worker: []                    # Static IPv4s for worker VMs on the Rancher NIC
 
 # Legacy Harvester LoadBalancer values (unused when kubeVip.enabled=true)
 loadBalancer:
@@ -50,8 +64,8 @@ kubeVip:
   address: ""                        # Required when enabled
   interface: eth0
   cidr: ""                           # Optional CIDR prefix for vip_address (defaults to interface route)
-  image: ghcr.io/kube-vip/kube-vip:v0.8.8
-  serviceAccountName: kube-vip       # ServiceAccount used by the static pod
+  image: ghcr.io/kube-vip/kube-vip:v0.8.9
+  serviceAccountName: kube-vip-static       # ServiceAccount used by the static pod
   rbac:
     create: true                     # Set false if you manage kube-vip RBAC yourself
 
@@ -60,11 +74,17 @@ tlsSANs:
 
 resources:
   controlPlane:
-    cpuCores: 2
-    memoryMi: 16386
+    cpuCores: 2                 # initial CPU sockets/cores
+    maxCpuSockets: 2            # optional ceiling for CPU hotplug (defaults to cpuCores)
+    memoryMi: 16386             # initial guest memory in MiB
+    maxMemoryMi: 16386          # optional ceiling for memory hotplug (defaults to memoryMi)
+    enableHotplug: false        # add harvesterhci.io/enableCPUAndMemoryHotplug
   worker:
     cpuCores: 2
+    maxCpuSockets: 2
     memoryMi: 16386
+    maxMemoryMi: 16386
+    enableHotplug: false
 
 ssh:
   user: rocky                     # user that cloud‑init will create
@@ -74,3 +94,32 @@ rke2:
   token: ""  # will be filled from secret rke2-token
   version: "v1.33.5+rke2r1"        # RKE2 version you want to run
   cni: "canal"                     # or calico, multus, etc.
+
+rancherManager:
+  enabled: false
+  chartRepo: https://releases.rancher.com/server-charts/latest
+  chartName: rancher
+  chartVersion: ""
+  helmChartNamespace: kube-system
+  namespace: cattle-system
+  hostname: ""
+  bootstrapPassword: ""
+  replicas: 3
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""
+    annotations: {}
+  ingress:
+    tlsSource: secret            # secret/manual/private-ca, letsEncrypt, or rancher
+    tlsSecretName: ""          # Required when tlsSource=secret
+    extraAnnotations: {}
+
+metallb:
+  enabled: false
+  chartRepo: https://metallb.github.io/metallb
+  chartName: metallb
+  chartVersion: ""
+  helmChartNamespace: kube-system
+  namespace: metallb-system
+  valuesContent: ""
+  addressPools: []              # e.g. [{ name: rancher, protocol: layer2, autoAssign: false, addresses: ["192.168.10.6-192.168.10.9"] }]

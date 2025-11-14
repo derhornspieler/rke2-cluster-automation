@@ -1,4 +1,5 @@
 {{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
 {{- $cloudConfig := printf "%s-cloud-config" (include "rke2-harvester.fullname" .) -}}
 {{- $imageNamespace := .Values.image.namespace -}}
 {{- $imageName := .Values.image.name -}}
@@ -18,10 +19,32 @@
 {{- $gateway := .Values.networks.vm.gateway | default "" -}}
 {{- $dns := .Values.networks.vm.nameservers | default (list) -}}
 {{- $netInterface := .Values.networks.vm.interface | default "eth0" -}}
+{{- $rancherNet := .Values.networks.rancher | default (dict) -}}
+{{- $rancherNS := $rancherNet.namespace | default "" -}}
+{{- $rancherName := $rancherNet.name | default "" -}}
+{{- $rancherEnabled := and ($rancherNet.enabled | default false) (ne $rancherNS "") (ne $rancherName "") -}}
+{{- $rancherNetwork := ternary (printf "%s/%s" $rancherNS $rancherName) "" $rancherEnabled -}}
+{{- $rancherInterface := $rancherNet.interface | default "eth1" -}}
+{{- $rancherPrefix := int (default 24 $rancherNet.prefix) -}}
+{{- $rancherRoutes := $rancherNet.routes | default (list) -}}
+{{- $rancherCpIPs := $rancherNet.staticIPs.controlPlane | default (list) -}}
+{{- $rancherWkIPs := $rancherNet.staticIPs.worker | default (list) -}}
 {{- $cpCPU := int (default 2 .Values.resources.controlPlane.cpuCores) -}}
-{{- $cpMem := printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi)) -}}
+{{- $cpHotplug := default false .Values.resources.controlPlane.enableHotplug -}}
+{{- $cpMaxSockets := int (default $cpCPU .Values.resources.controlPlane.maxCpuSockets) -}}
+{{- $cpMemMi := int (default 4096 .Values.resources.controlPlane.memoryMi) -}}
+{{- $cpMem := printf "%dMi" $cpMemMi -}}
+{{- $cpMemMax := printf "%dMi" (int (default $cpMemMi .Values.resources.controlPlane.maxMemoryMi)) -}}
+{{- $cpCpuLimit := ternary $cpMaxSockets $cpCPU $cpHotplug -}}
+{{- $cpMemLimit := ternary $cpMemMax $cpMem $cpHotplug -}}
 {{- $wkCPU := int (default 2 .Values.resources.worker.cpuCores) -}}
-{{- $wkMem := printf "%dMi" (int (default 4096 .Values.resources.worker.memoryMi)) -}}
+{{- $wkHotplug := default false .Values.resources.worker.enableHotplug -}}
+{{- $wkMaxSockets := int (default $wkCPU .Values.resources.worker.maxCpuSockets) -}}
+{{- $wkMemMi := int (default 4096 .Values.resources.worker.memoryMi) -}}
+{{- $wkMem := printf "%dMi" $wkMemMi -}}
+{{- $wkMemMax := printf "%dMi" (int (default $wkMemMi .Values.resources.worker.maxMemoryMi)) -}}
+{{- $wkCpuLimit := ternary $wkMaxSockets $wkCPU $wkHotplug -}}
+{{- $wkMemLimit := ternary $wkMemMax $wkMem $wkHotplug -}}
 {{- $cpCount := .Values.replicaCounts.controlPlane | int -}}
 {{- $wkCount := .Values.replicaCounts.worker | int -}}
 
@@ -34,12 +57,14 @@
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
 {{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $cpMacs "index" $i) -}}
 {{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $cpIPs "index" $i) -}}
+{{- $rancherIP := include "rke2-harvester.valueForIndex" (dict "list" $rancherCpIPs "index" $i) -}}
+{{- $rancherHasIP := and $rancherEnabled $rancherIP -}}
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: {{ $vmName }}
-  namespace: rke2
+  namespace: {{ $namespace }}
   labels:
     app.kubernetes.io/name: {{ $namePrefix }}
     app.kubernetes.io/component: controlplane
@@ -47,6 +72,9 @@ metadata:
   annotations:
     harvesterhci.io/volumeClaimTemplates: |-
 {{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $cpDisk) | indent 6 }}
+{{- if $cpHotplug }}
+    harvesterhci.io/enableCPUAndMemoryHotplug: "true"
+{{- end }}
 spec:
   runStrategy: Always
   template:
@@ -69,14 +97,26 @@ spec:
             app.kubernetes.io/component: controlplane
       domain:
         cpu:
+{{- if $cpHotplug }}
+          sockets: {{ $cpCPU }}
+          cores: 1
+          threads: 1
+          maxSockets: {{ $cpMaxSockets }}
+{{- else }}
           cores: {{ $cpCPU }}
+{{- end }}
         resources:
           limits:
-            memory: {{ $cpMem }}
-            cpu: {{ $cpCPU }}
+            memory: {{ $cpMemLimit }}
+            cpu: {{ $cpCpuLimit }}
           requests:
             memory: {{ $cpMem }}
             cpu: {{ $cpCPU }}
+{{- if $cpHotplug }}
+        memory:
+          guest: {{ $cpMem }}
+          maxGuest: {{ $cpMemMax }}
+{{- end }}
         devices:
           autoattachPodInterface: false
           disks:
@@ -94,10 +134,20 @@ spec:
 {{- if $macAddr }}
             macAddress: {{ $macAddr }}
 {{- end }}
+{{- if $rancherEnabled }}
+          - name: rancher
+            bridge: {}
+            model: virtio
+{{- end }}
       networks:
       - name: primary
         multus:
           networkName: {{ $vmNetwork }}
+{{- if $rancherEnabled }}
+      - name: rancher
+        multus:
+          networkName: {{ $rancherNetwork }}
+{{- end }}
       volumes:
       - name: rootdisk
         persistentVolumeClaim:
@@ -106,9 +156,16 @@ spec:
         cloudInitNoCloud:
           secretRef:
             name: {{ $cloudConfig }}
-{{- if $staticIP }}
+{{- if or $staticIP $rancherHasIP }}
           networkData: |
-{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface) | indent 12 }}
+{{- $secondary := dict -}}
+{{- if $rancherHasIP }}
+{{- $_ := set $secondary "address" $rancherIP -}}
+{{- $_ := set $secondary "prefix" $rancherPrefix -}}
+{{- $_ := set $secondary "interface" $rancherInterface -}}
+{{- $_ := set $secondary "routes" $rancherRoutes -}}
+{{- end }}
+{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface "secondary" $secondary) | indent 12 }}
 {{- end }}
 {{ end }}
 
@@ -121,12 +178,14 @@ spec:
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
 {{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $wkMacs "index" $i) -}}
 {{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $wkIPs "index" $i) -}}
+{{- $rancherIP := include "rke2-harvester.valueForIndex" (dict "list" $rancherWkIPs "index" $i) -}}
+{{- $rancherHasIP := and $rancherEnabled $rancherIP -}}
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: {{ $vmName }}
-  namespace: rke2
+  namespace: {{ $namespace }}
   labels:
     app.kubernetes.io/name: {{ $namePrefix }}
     app.kubernetes.io/component: worker
@@ -134,6 +193,9 @@ metadata:
   annotations:
     harvesterhci.io/volumeClaimTemplates: |-
 {{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $pvcName "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $wkDisk) | indent 6 }}
+{{- if $wkHotplug }}
+    harvesterhci.io/enableCPUAndMemoryHotplug: "true"
+{{- end }}
 spec:
   runStrategy: Always
   template:
@@ -156,14 +218,26 @@ spec:
             app.kubernetes.io/component: worker
       domain:
         cpu:
+{{- if $wkHotplug }}
+          sockets: {{ $wkCPU }}
+          cores: 1
+          threads: 1
+          maxSockets: {{ $wkMaxSockets }}
+{{- else }}
           cores: {{ $wkCPU }}
+{{- end }}
         resources:
           limits:
-            memory: {{ $wkMem }}
-            cpu: {{ $wkCPU }}
+            memory: {{ $wkMemLimit }}
+            cpu: {{ $wkCpuLimit }}
           requests:
             memory: {{ $wkMem }}
             cpu: {{ $wkCPU }}
+{{- if $wkHotplug }}
+        memory:
+          guest: {{ $wkMem }}
+          maxGuest: {{ $wkMemMax }}
+{{- end }}
         devices:
           autoattachPodInterface: false
           disks:
@@ -181,10 +255,20 @@ spec:
 {{- if $macAddr }}
             macAddress: {{ $macAddr }}
 {{- end }}
+{{- if $rancherEnabled }}
+          - name: rancher
+            bridge: {}
+            model: virtio
+{{- end }}
       networks:
       - name: primary
         multus:
           networkName: {{ $vmNetwork }}
+{{- if $rancherEnabled }}
+      - name: rancher
+        multus:
+          networkName: {{ $rancherNetwork }}
+{{- end }}
       volumes:
       - name: rootdisk
         persistentVolumeClaim:
@@ -193,8 +277,15 @@ spec:
         cloudInitNoCloud:
           secretRef:
             name: {{ $cloudConfig }}
-{{- if $staticIP }}
+{{- if or $staticIP $rancherHasIP }}
           networkData: |
-{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface) | indent 12 }}
+{{- $secondary := dict -}}
+{{- if $rancherHasIP }}
+{{- $_ := set $secondary "address" $rancherIP -}}
+{{- $_ := set $secondary "prefix" $rancherPrefix -}}
+{{- $_ := set $secondary "interface" $rancherInterface -}}
+{{- $_ := set $secondary "routes" $rancherRoutes -}}
+{{- end }}
+{{ include "rke2-harvester.networkData" (dict "address" $staticIP "prefix" $prefix "gateway" $gateway "dns" $dns "interface" $netInterface "secondary" $secondary) | indent 12 }}
 {{- end }}
 {{ end }}

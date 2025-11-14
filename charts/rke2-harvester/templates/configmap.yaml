@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: {{ include "rke2-harvester.fullname" . }}-cloud-config
-  namespace: rke2
+  namespace: {{ default .Release.Namespace .Values.namespaceOverride }}
 type: Opaque
 stringData:
   userdata: |

@@ -1,5 +1,6 @@
 {{- $fullname := include "rke2-harvester.fullname" . -}}
 {{- $cloudConfig := printf "%s-cloud-config" $fullname -}}
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
 {{- $imageNamespace := .Values.image.namespace -}}
 {{- $imageName := .Values.image.name -}}
 {{- $imageID := printf "%s/%s" .Values.image.namespace .Values.image.name -}}
@@ -11,9 +12,21 @@
 {{- $wkCount := .Values.replicaCounts.worker | int -}}
 {{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
 {{- $releaseRevision := default 1 .Release.Revision -}}
+{{- $cpCPU := int (default 2 .Values.resources.controlPlane.cpuCores) -}}
+{{- $cpHotplug := default false .Values.resources.controlPlane.enableHotplug -}}
+{{- $cpMaxSockets := int (default $cpCPU .Values.resources.controlPlane.maxCpuSockets) -}}
+{{- $cpMemMi := int (default 4096 .Values.resources.controlPlane.memoryMi) -}}
+{{- $cpMem := printf "%dMi" $cpMemMi -}}
+{{- $cpMemMax := printf "%dMi" (int (default $cpMemMi .Values.resources.controlPlane.maxMemoryMi)) -}}
+{{- $wkCPU := int (default 2 .Values.resources.worker.cpuCores) -}}
+{{- $wkHotplug := default false .Values.resources.worker.enableHotplug -}}
+{{- $wkMaxSockets := int (default $wkCPU .Values.resources.worker.maxCpuSockets) -}}
+{{- $wkMemMi := int (default 4096 .Values.resources.worker.memoryMi) -}}
+{{- $wkMem := printf "%dMi" $wkMemMi -}}
+{{- $wkMemMax := printf "%dMi" (int (default $wkMemMi .Values.resources.worker.maxMemoryMi)) -}}
 {{- $roles := list
-  (dict "key" "controlplane" "description" "RKE2 control-plane VM for Harvester" "cpu" (int (default 2 .Values.resources.controlPlane.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.controlPlane.memoryMi))))
-  (dict "key" "worker" "description" "RKE2 worker VM for Harvester" "cpu" (int (default 2 .Values.resources.worker.cpuCores)) "memory" (printf "%dMi" (int (default 4096 .Values.resources.worker.memoryMi))))
+  (dict "key" "controlplane" "description" "RKE2 control-plane VM for Harvester" "cpu" $cpCPU "cpuMax" $cpMaxSockets "memory" $cpMem "memoryMax" $cpMemMax "hotplug" $cpHotplug)
+  (dict "key" "worker" "description" "RKE2 worker VM for Harvester" "cpu" $wkCPU "cpuMax" $wkMaxSockets "memory" $wkMem "memoryMax" $wkMemMax "hotplug" $wkHotplug)
 -}}
 {{- range $role := $roles }}
 {{- if or (ne $role.key "worker") (gt $wkCount 0) }}
@@ -24,7 +37,7 @@ apiVersion: harvesterhci.io/v1beta1
 kind: VirtualMachineTemplate
 metadata:
   name: {{ $templateName }}
-  namespace: rke2
+  namespace: {{ $namespace }}
 spec:
   description: {{ $role.description }}
 ---
@@ -32,16 +45,19 @@ apiVersion: harvesterhci.io/v1beta1
 kind: VirtualMachineTemplateVersion
 metadata:
   name: {{ $versionName }}
-  namespace: rke2
+  namespace: {{ $namespace }}
   annotations:
     harvesterhci.io/default-userdata-secret: {{ $cloudConfig }}
 spec:
-  templateId: rke2/{{ $templateName }}
+  templateId: {{ printf "%s/%s" $namespace $templateName }}
   vm:
     metadata:
       annotations:
         harvesterhci.io/volumeClaimTemplates: |-
 {{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" "pvc-rootdisk" "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $storageSize) | indent 10 }}
+{{- if $role.hotplug }}
+        harvesterhci.io/enableCPUAndMemoryHotplug: "true"
+{{- end }}
     spec:
       runStrategy: Always
       template:
@@ -49,14 +65,26 @@ spec:
           evictionStrategy: LiveMigrateIfPossible
           domain:
             cpu:
+{{- if $role.hotplug }}
+              sockets: {{ $role.cpu }}
+              cores: 1
+              threads: 1
+              maxSockets: {{ $role.cpuMax }}
+{{- else }}
               cores: {{ $role.cpu }}
+{{- end }}
             resources:
               limits:
-                memory: {{ $role.memory }}
-                cpu: {{ $role.cpu }}
+                memory: {{ ternary $role.memoryMax $role.memory $role.hotplug }}
+                cpu: {{ ternary $role.cpuMax $role.cpu $role.hotplug }}
               requests:
                 memory: {{ $role.memory }}
                 cpu: {{ $role.cpu }}
+{{- if $role.hotplug }}
+            memory:
+              guest: {{ $role.memory }}
+              maxGuest: {{ $role.memoryMax }}
+{{- end }}
             devices:
               autoattachPodInterface: false
               disks:

@@ -38,27 +38,212 @@
 {{- end -}}
 
 {{- define "rke2-harvester.networkData" -}}
-{{- $address := .address -}}
+{{- $address := .address | default "" -}}
 {{- $prefix := int (default 24 .prefix) -}}
-{{- $gateway := .gateway -}}
+{{- $gateway := .gateway | default "" -}}
 {{- $dns := .dns | default (list) -}}
 {{- $interface := .interface | default "eth0" -}}
+{{- $secondary := .secondary | default (dict) -}}
+{{- $secondaryAddress := $secondary.address | default "" -}}
+{{- $secondaryPrefix := int (default 24 $secondary.prefix) -}}
+{{- $secondaryInterface := $secondary.interface | default "" -}}
+{{- $secondaryRoutes := $secondary.routes | default (list) -}}
 version: 2
 ethernets:
   {{ $interface }}:
+{{- if $address }}
     dhcp4: false
     addresses:
       - {{ printf "%s/%d" $address $prefix }}
-{{- if $gateway }}
+{{- else }}
+    dhcp4: true
+{{- end }}
+{{- if and $gateway $address }}
     gateway4: {{ $gateway }}
 {{- end }}
-{{- if $dns }}
+{{- if and $dns $address }}
     nameservers:
       addresses:
 {{- range $dns }}
         - {{ . }}
 {{- end }}
 {{- end }}
+{{- if and $secondaryInterface $secondaryAddress }}
+  {{ $secondaryInterface }}:
+    dhcp4: false
+    addresses:
+      - {{ printf "%s/%d" $secondaryAddress $secondaryPrefix }}
+{{- if $secondaryRoutes }}
+    routes:
+{{- range $route := $secondaryRoutes }}
+{{- if $route.to }}
+      - to: {{ $route.to }}
+{{- if $route.via }}
+        via: {{ $route.via }}
+{{- end }}
+{{- if $route.metric }}
+        metric: {{ $route.metric }}
+{{- end }}
+{{- if $route.scope }}
+        scope: {{ $route.scope }}
+{{- end }}
+{{- if $route.table }}
+        table: {{ $route.table }}
+{{- end }}
+{{- if hasKey $route "onlink" }}
+        on-link: {{ $route.onlink }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{- define "rke2-harvester.kubeVipRBACManifest" -}}
+{{- $vip := .Values.kubeVip | default dict -}}
+{{- $enabled := and ($vip.enabled | default false) $vip.address -}}
+{{- if and $enabled ($vip.rbac.create | default true) -}}
+{{- $namespace := default "kube-system" $vip.namespace -}}
+{{- $defaultSA := printf "%s-kube-vip" (include "rke2-harvester.fullname" .) -}}
+{{- $serviceAccount := default $defaultSA $vip.serviceAccountName -}}
+{{- $resourceName := printf "%s-kube-vip" (include "rke2-harvester.fullname" .) -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $resourceName }}
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $resourceName }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $resourceName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $namespace }}
+{{- end -}}
+{{- end -}}
+
+{{- define "rke2-harvester.rancherValues" -}}
+{{- $rm := .Values.rancherManager | default (dict) -}}
+{{- $values := dict -}}
+{{- $_ := set $values "hostname" ($rm.hostname | default "") -}}
+{{- if $rm.bootstrapPassword }}
+{{- $_ := set $values "bootstrapPassword" $rm.bootstrapPassword -}}
+{{- end }}
+{{- $_ := set $values "replicas" ($rm.replicas | default 3) -}}
+{{- $ing := $rm.ingress | default (dict) -}}
+{{- $tls := dict "source" ($ing.tlsSource | default "secret") -}}
+{{- if $ing.tlsSecretName }}
+{{- $_ := set $tls "secretName" $ing.tlsSecretName -}}
+{{- end }}
+{{- $ingress := dict "tls" $tls -}}
+{{- if $ing.extraAnnotations }}
+{{- $_ := set $ingress "extraAnnotations" $ing.extraAnnotations -}}
+{{- end }}
+{{- if gt (len $ingress) 0 }}
+{{- $_ := set $values "ingress" $ingress -}}
+{{- end }}
+{{- $svc := $rm.service | default (dict) -}}
+{{- $service := dict -}}
+{{- $_ := set $service "type" ($svc.type | default "LoadBalancer") -}}
+{{- if $svc.loadBalancerIP }}
+{{- $_ := set $service "loadBalancerIP" $svc.loadBalancerIP -}}
+{{- end }}
+{{- if $svc.annotations }}
+{{- $_ := set $service "annotations" $svc.annotations -}}
+{{- end }}
+{{- $_ := set $values "service" $service -}}
+{{ toYaml $values }}
+{{- end -}}
+
+{{- define "rke2-harvester.rancherHelmChart" -}}
+{{- $rm := .Values.rancherManager | default (dict) -}}
+{{- $helmNS := $rm.helmChartNamespace | default "kube-system" -}}
+{{- $targetNS := $rm.namespace | default "cattle-system" -}}
+{{- $repo := $rm.chartRepo | default "https://releases.rancher.com/server-charts/latest" -}}
+{{- $chart := $rm.chartName | default "rancher" -}}
+{{- $releaseName := printf "%s-rancher" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: {{ $releaseName }}
+  namespace: {{ $helmNS }}
+spec:
+  chart: {{ $chart }}
+  repo: {{ $repo | quote }}
+  targetNamespace: {{ $targetNS }}
+{{- if $rm.chartVersion }}
+  version: {{ $rm.chartVersion | quote }}
+{{- end }}
+  valuesContent: |
+{{ include "rke2-harvester.rancherValues" . | indent 4 }}
+{{- end -}}
+
+{{- define "rke2-harvester.metallbValues" -}}
+{{- $mlb := .Values.metallb | default (dict) -}}
+{{- if $mlb.valuesContent }}
+{{ $mlb.valuesContent }}
+{{- else }}
+configInline:
+{{- $pools := $mlb.addressPools | default (list) -}}
+{{- if gt (len $pools) 0 }}
+  address-pools:
+{{- range $pool := $pools }}
+    - name: {{ $pool.name | default "default" }}
+      protocol: {{ $pool.protocol | default "layer2" }}
+{{- if hasKey $pool "autoAssign" }}
+      auto-assign: {{ $pool.autoAssign }}
+{{- end }}
+      addresses:
+{{- range $addr := $pool.addresses | default (list) }}
+        - {{ $addr }}
+{{- end }}
+{{- end }}
+{{- else }}
+  address-pools: []
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.metallbHelmChart" -}}
+{{- $mlb := .Values.metallb | default (dict) -}}
+{{- $helmNS := $mlb.helmChartNamespace | default "kube-system" -}}
+{{- $targetNS := $mlb.namespace | default "metallb-system" -}}
+{{- $repo := $mlb.chartRepo | default "https://metallb.github.io/metallb" -}}
+{{- $chart := $mlb.chartName | default "metallb" -}}
+{{- $releaseName := printf "%s-metallb" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: {{ $releaseName }}
+  namespace: {{ $helmNS }}
+spec:
+  chart: {{ $chart }}
+  repo: {{ $repo | quote }}
+  targetNamespace: {{ $targetNS }}
+{{- if $mlb.chartVersion }}
+  version: {{ $mlb.chartVersion | quote }}
+{{- end }}
+  valuesContent: |
+{{ include "rke2-harvester.metallbValues" . | indent 4 }}
 {{- end -}}
 
 {{- define "rke2-harvester.kubeVipStaticManifest" -}}
@@ -146,6 +331,7 @@ write_files:
       cloud-provider-name: harvester
 {{- $kubeVip := .Values.kubeVip | default dict -}}
 {{- $hasVip := and ($kubeVip.enabled | default false) $kubeVip.address }}
+{{- $vipRBAC := and $hasVip ($kubeVip.rbac.create | default true) }}
 {{- if $hasVip }}
       server: https://{{ $kubeVip.address }}:9345
 {{- end }}
@@ -158,12 +344,33 @@ write_files:
         - {{ . }}
 {{- end }}
 {{- end }}
+{{- if $vipRBAC }}
+  - path: /var/lib/rancher/rke2/server/manifests/kube-vip-rbac.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.kubeVipRBACManifest" . | indent 6 }}
+{{- end }}
 {{- if $hasVip }}
   - path: /var/lib/rancher/rke2/server/manifests/kube-vip.yaml
     owner: root:root
     permissions: "0644"
     content: |
 {{ include "rke2-harvester.kubeVipStaticManifest" . | indent 6 }}
+{{- end }}
+{{- if .Values.rancherManager.enabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/rancher-manager.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.rancherHelmChart" . | indent 6 }}
+{{- end }}
+{{- if .Values.metallb.enabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.metallbHelmChart" . | indent 6 }}
 {{- end }}
 chpasswd:
   list: |
