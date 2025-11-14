@@ -60,6 +60,8 @@ The split above answers the "one command" question: Helm is responsible for ever
    These manifests create NADs bound to Harvester’s built-in `mgmt` cluster network/bridge (`mgmt-br`). If your hosts use a different cluster network, change the `network.harvesterhci.io/clusternetwork` label and the `"bridge"` value in `manifests/network/networks.yaml` before applying. The bundled DHCP pool now excludes `192.168.10.5` so that the default control-plane VIP stays reserved; adjust the `exclude` list if you select a different VIP.
 
 4. **Control-plane VIP via kube-vip (recommended):** pick an unused IP on the workload VLAN and reserve it (DHCP exclusion or static mapping). Set `kubeVip.enabled: true`, `kubeVip.address`, `kubeVip.interface`, and (optionally) `kubeVip.image` in your values file. During cloud-init every control-plane VM pulls the kube-vip image, renders the manifest into `/var/lib/rancher/rke2/server/manifests/kube-vip.yaml`, and RKE2 schedules it as a static pod once the kubelet starts. The first control-plane VM automatically removes the `server:` entry from `/etc/rancher/rke2/config.yaml` so it can bootstrap etcd, while subsequent control-plane nodes keep the endpoint and join through the VIP.
+5. **Harvester cloud-provider kubeconfig:** the Harvester CCM requires a kubeconfig on disk. Run `generate_addon.sh <serviceaccount> <namespace>` from the [official docs](https://docs.harvesterhci.io/v1.6/rancher/cloud-provider) against your Harvester management cluster, then paste the `########## cloud config ############` output into `cloudProvider.cloudConfig` (or pass it with `--set-file`). The chart writes it to `/var/lib/rancher/rke2/etc/config-files/cloud-provider-config` during cloud-init so the CCM pod can start and clear the `node.cloudprovider.kubernetes.io/uninitialized` taint automatically. A lightweight background script also removes the taint locally after kubelet comes up so the cluster can proceed even if the CCM cannot reach Harvester yet.
+6. **(Optional) MetalLB for LoadBalancer services:** enable `metallb.enabled` and define one or more `addressPools`. Helm will drop a MetalLB HelmChart manifest next to kube-vip and Rancher, so cluster services of type `LoadBalancer` get an address immediately. Annotate services with `metallb.universe.tf/address-pool` and `metallb.universe.tf/loadBalancerIPs` to pin specific VIPs (e.g., Rancher).
 
 5. **Bootstrap SSH key + RBAC:** create and apply the secret *before* running the bootstrap job. It must contain the private key that matches `values.yaml#ssh.publicKey`. You can edit `manifests/bootstrap/ssh-key-secret.yaml` (it includes an inline `stringData` placeholder) and apply it:
    ```bash
@@ -99,6 +101,15 @@ The split above answers the "one command" question: Helm is responsible for ever
    Wait for the VM to reach `Running`, confirm RKE2 is healthy, and (if you enabled the VIP) test `curl -k https://<vip>:6443/version` from a Harvester host to ensure kube-vip is answering.
 
 3. Scale to your desired size by editing `replicaCounts.controlPlane` / `.worker` in the same values file and re-running the identical `helm upgrade --install` command. Helm reconciles the VM set while preserving existing PVCs.
+
+4. Provide the Harvester CCM kubeconfig by running the upstream script against your Harvester management cluster (requires a service-account token with access to the namespace where these VMs live):
+   ```bash
+   curl -sfL https://raw.githubusercontent.com/harvester/cloud-provider-harvester/master/deploy/generate_addon.sh \\
+     | bash -s harvester-cloud-provider hvst-mgmt
+   ```
+   Copy the `########## cloud config ############` output into `cloudProvider.cloudConfig` (or feed it via `--set-file cloudProvider.cloudConfig=/path/to/file`). The chart writes it to `/var/lib/rancher/rke2/etc/config-files/cloud-provider-config` so the Harvester CCM pod can start and automatically remove the `node.cloudprovider.kubernetes.io/uninitialized` taint.
+
+5. (Optional) Enable MetalLB by setting `metallb.enabled: true` and defining address pools that cover your desired LoadBalancer VIP range. The chart renders a MetalLB HelmChart manifest into `/var/lib/rancher/rke2/server/manifests/metallb.yaml`, so the controller deploys alongside kube-vip. Annotate services (e.g., Rancher) with `metallb.universe.tf/address-pool` and `metallb.universe.tf/loadBalancerIPs` to pin them to specific IPs.
 
 Regardless of the replica count, you still need to:
 

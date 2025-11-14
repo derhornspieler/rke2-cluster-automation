@@ -365,6 +365,16 @@ write_files:
     content: |
 {{ include "rke2-harvester.rancherHelmChart" . | indent 6 }}
 {{- end }}
+{{- $cloudProvider := .Values.cloudProvider | default (dict) -}}
+{{- if $cloudProvider.cloudConfig }}
+  - path: {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" }}
+    owner: root:root
+    permissions: "0644"
+    selinux:
+      context: system_u:object_r:container_file_t:s0
+    content: |
+{{ $cloudProvider.cloudConfig | indent 6 }}
+{{- end }}
 {{- if .Values.metallb.enabled }}
   - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
     owner: root:root
@@ -393,4 +403,21 @@ runcmd:
     curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=${INSTALL_TYPE} sh -
     systemctl enable ${SERVICE}.service
     systemctl start ${SERVICE}.service
+  - |
+    cat <<'EOF' >/usr/local/bin/clear-harvester-taint.sh
+    #!/bin/bash
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    for i in {1..60}; do
+      if kubectl get nodes >/dev/null 2>&1; then
+        NODE=$(hostname)
+        kubectl taint nodes "$NODE" node.cloudprovider.kubernetes.io/uninitialized:NoSchedule- || true
+        exit 0
+      fi
+      sleep 5
+    done
+    exit 0
+    EOF
+    chmod +x /usr/local/bin/clear-harvester-taint.sh
+    /usr/local/bin/clear-harvester-taint.sh &
 {{- end -}}
