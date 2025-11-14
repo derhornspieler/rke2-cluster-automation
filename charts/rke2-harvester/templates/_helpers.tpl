@@ -388,6 +388,9 @@ chpasswd:
   expire: false
 runcmd:
   - systemctl enable --now qemu-guest-agent.service
+{{- if $cloudProvider.cloudConfig }}
+  - chcon -t container_file_t {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" }} || true
+{{- end }}
   - |
     set -euo pipefail
     HOSTNAME="$(hostname)"

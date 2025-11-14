@@ -1,0 +1,146 @@
+# Optional: override namespace where resources are created (defaults to release namespace)
+namespaceOverride: ""
+
+# ------------------------------------------------------------------
+# Global settings
+# ------------------------------------------------------------------
+replicaCounts:
+  controlPlane: 3         # number of RKE2 control‑plane VMs
+  worker: 0              # number of RKE2 worker VMs
+
+image:
+  namespace: harvester-public        # Namespace that holds the VirtualMachineImage
+  name: rocky-9-cloudimg             # Must exist in Harvester’s Image catalog
+  pullPolicy: IfNotPresent
+
+vmNamePrefix: ""                  # Prefix for VM names (falls back to release name)
+
+storage:
+  className: ""    # leave empty to let Harvester pick the per-image StorageClass
+  accessMode: ReadWriteMany
+  volumeMode: Block
+  size: 30Gi   # default/fallback size
+  controlPlaneSize: 200Gi
+  workerSize: 200Gi
+
+networks:
+  vm:
+    namespace: hvst-mgmt
+    name: vlan2003  # Workload VM network (VLAN 2003)
+    interface: eth0
+    prefix: 24
+    gateway: 192.168.10.1
+    nameservers:
+      - 192.168.10.1
+    macAddresses:
+      controlPlane: []                # Leave empty when using static IPs
+      worker: []
+    staticIPs:
+      controlPlane:
+        - 192.168.10.3
+        - 192.168.10.4
+        - 192.168.10.5
+      worker: []
+  rancher:
+    enabled: false
+    namespace: ""
+    name: ""
+    interface: eth1
+    prefix: 24
+    routes: []
+    staticIPs:
+      controlPlane: []
+      worker: []
+
+loadBalancer:
+  enabled: false
+  namespace: rke2
+  vip: "192.168.10.2"
+  subnet: "192.168.10.0/24"
+  gateway: "192.168.10.1"
+  network: "vlan2003"
+
+kubeVip:
+  enabled: true                     # set to true to enable kube-vip for VIP management
+  address: "192.168.10.2"
+  interface: eth0
+  cidr: 24
+  image: ghcr.io/kube-vip/kube-vip:v0.8.9
+  serviceAccountName: kube-vip-static
+  rbac:
+    create: true
+
+tlsSANs:
+  - api.aegisgroup.ch
+  - internal-vip.local                          # optional extra SAN entries (FQDNs, additional IPs)
+
+resources:
+  controlPlane:
+    cpuCores: 4
+    maxCpuSockets: 4
+    memoryMi: 16384
+    maxMemoryMi: 8192
+    enableHotplug: false
+  worker:
+    cpuCores: 4
+    maxCpuSockets: 4
+    memoryMi: 16384
+    maxMemoryMi: 8192
+    enableHotplug: true
+
+ssh:
+  user: rocky                     # user that cloud‑init will create
+  publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK6LbWP3r925P5b+vFcbldXIppYkWgOsqtG6KBINXSEp jruds@ag-mbp.local"  # fill with your SSH public key (optional)
+  password: rocky2025             # optional console password (plain text)
+
+rke2:
+  token: "YCWf9e6tKSzD$vp0pd1jt&Mm2aBDKFWTczA#S$f!FMCNww#"                        # will be filled from secret rke2-token
+  version: "v1.33.5+rke2r1"        # RKE2 version you want to run
+  cni: "canal"                     # or calico, multus, etc.
+
+rancherManager:
+  enabled: true
+  hostname: rancher.aegisgroup.ch
+  bootstrapPassword: "password123456"
+  chartVersion: "v2.12.3"
+  service:
+    type: LoadBalancer
+    loadBalancerIP: 192.168.10.6
+    annotations:
+      metallb.universe.tf/address-pool: rancher-vip
+      metallb.universe.tf/loadBalancerIPs: 192.168.10.6
+  ingress:
+    tlsSource: secret
+    tlsSecretName: rancher-private-tls
+    extraAnnotations: {}
+
+metallb:
+  enabled: true
+  addressPools:
+    - name: rancher-vip
+      protocol: layer2
+      autoAssign: false
+      addresses:
+        - 192.168.10.6-192.168.10.9
+
+cloudProvider:
+  cloudConfig: |-
+    ########## cloud config ############
+    apiVersion: v1
+    clusters:
+    - cluster:
+        certificate-authority-data: <CA_DATA>
+      name: local
+    contexts:
+    - context:
+        cluster: local
+        namespace: rke2
+        user: rke2-mgmt-cloud-provider-rke2-local
+      name: rke2-mgmt-cloud-provider-rke2-local
+    current-context: rke2-mgmt-cloud-provider-rke2-local
+    kind: Config
+    preferences: {}
+    users:
+    - name: rke2-mgmt-cloud-provider-rke2-local
+      user:
+        token: <token>
