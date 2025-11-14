@@ -202,24 +202,7 @@ spec:
 {{- if $mlb.valuesContent }}
 {{ $mlb.valuesContent }}
 {{- else }}
-configInline:
-{{- $pools := $mlb.addressPools | default (list) -}}
-{{- if gt (len $pools) 0 }}
-  address-pools:
-{{- range $pool := $pools }}
-    - name: {{ $pool.name | default "default" }}
-      protocol: {{ $pool.protocol | default "layer2" }}
-{{- if hasKey $pool "autoAssign" }}
-      auto-assign: {{ $pool.autoAssign }}
-{{- end }}
-      addresses:
-{{- range $addr := $pool.addresses | default (list) }}
-        - {{ $addr }}
-{{- end }}
-{{- end }}
-{{- else }}
-  address-pools: []
-{{- end }}
+{}
 {{- end }}
 {{- end -}}
 
