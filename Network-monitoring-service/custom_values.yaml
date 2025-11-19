@@ -1,12 +1,14 @@
 global:
   imageRegistry: ""
   storageClass: ""
-  replicas: 2
+  replicas: 3
 
 deepflow:
-  image: deepflowce/deepflow-server:v7.1.0
-  agentImage: deepflowce/deepflow-agent:v7.1.0
+  version: "7.1.0"
+  image: "deepflowce/deepflow-server:v7.1.0"
+  agentImage: "deepflowce/deepflow-agent:v7.1.0"
   ports:
+    querier: 20416
     data: 20417
     api: 30880
     otel: 38086
@@ -18,7 +20,7 @@ mysql:
   password: "deepflow"
 
 clickhouse:
-  image: deepflowce/clickhouse-server:23.8.7.24
+  image: "yandex/clickhouse-server:22.3"
 
 grafanaIntegration:
   enabled: true
@@ -35,6 +37,25 @@ prometheusIntegration:
   ruleNamespace: "cattle-monitoring-system"
   metricsPath: "/metrics"
 
+deepflowApp:
+  enabled: true
+  image: "deepflowce/deepflow-app:v7.1.0"
+  resources: {}
+  config:
+    logLevel: "info"
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""
+    nodePort: null
+  ingress:
+    enabled: false
+    className: "traefik"
+    annotations: {}
+    host: ""
+    tls:
+      enabled: false
+      secretName: ""
+
 traefik:
   enabled: false
   image: "traefik:v2.11"
@@ -46,49 +67,29 @@ traefik:
   resources: {}
 
 serviceLB:
-  enabled: true
-  interface: mgmt-br
+  enabled: false
+  image: "ghcr.io/kube-vip/kube-vip:v0.6.4"
+  interface: ""
   addressRange:
-    start: 172.16.2.6
-    end: 172.16.2.6
-
-traefik:
-  enabled: true
-  service:
-    type: LoadBalancer
-    loadBalancerIP: 172.16.2.6
-
-deepflowApp:
-  enabled: true
-  image: "deepflowce/deepflow-app:v7.1.0"
+    start: ""
+    end: ""
   resources: {}
-  config:
-    logLevel: "info"
-  service:
-    type: ClusterIP 
-  ingress:
-    enabled: true
-    className: "traefik"
-    host: "deepflow.aegisgroup.ch"
-    tls:
-      enabled: true
-      secretName: "deepflow-app-tls"
 
 resources:
   server:
-    requests:
-      cpu: "800m"
-      memory: "1.5Gi"
-    limits:
-      cpu: "2"
-      memory: "4Gi"
-  agent:
-    requests:
-      cpu: "300m"
-      memory: "384Mi"
     limits:
       cpu: "1"
+      memory: "2Gi"
+    requests:
+      cpu: "500m"
       memory: "1Gi"
+  agent:
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
   clickhouse:
     requests:
       storage: "10Gi"
