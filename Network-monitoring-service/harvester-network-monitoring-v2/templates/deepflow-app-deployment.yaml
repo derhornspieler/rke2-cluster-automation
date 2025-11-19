@@ -1,0 +1,59 @@
+{{- if .Values.deepflowApp.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-deepflow-app-config
+  namespace: {{ .Release.Namespace }}
+data:
+  app.yaml: |
+    app:
+      http_request_timeout: 600
+      http_response_timeout: 600
+      listen-port: 20418
+      log-file: /var/log/deepflow/app.log
+      log-level: {{ .Values.deepflowApp.config.logLevel | default "info" }}
+      controller:
+        host: {{ .Release.Name }}-server
+        port: {{ .Values.deepflow.ports.data }}
+        timeout: 60
+      querier:
+        host: {{ .Release.Name }}-server
+        port: {{ .Values.deepflow.ports.querier }}
+        timeout: 60
+      spec:
+        l7_tracing_limit: 100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepflow-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepflow-app
+  template:
+    metadata:
+      labels:
+        app: deepflow-app
+    spec:
+      containers:
+      - name: deepflow-app
+        image: {{ .Values.deepflowApp.image | quote }}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 20418
+          name: http
+        resources: {{- toYaml .Values.deepflowApp.resources | nindent 10 }}
+        volumeMounts:
+        - name: deepflow-app-config
+          mountPath: /etc/deepflow/app.yaml
+          subPath: app.yaml
+      volumes:
+      - name: deepflow-app-config
+        configMap:
+          name: {{ .Release.Name }}-deepflow-app-config
+{{- end }}

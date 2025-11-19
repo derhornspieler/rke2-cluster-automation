@@ -1,0 +1,9 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: Version
+metadata:
+  name: v1.6.1
+  namespace: harvester-system
+spec:
+  isoChecksum: 'a7192f5d5e21517d03d5e5cffe162026d8cd0691038f4c0eae5dc50d7ef416c935b233fc8bdc3bc02dcc7efaee6277e51bc4331867f4d9061d9ee3960324d63a'
+  isoURL: https://releases.rancher.com/harvester/v1.6.1/harvester-v1.6.1-amd64.iso
+  releaseDate: '20251016'

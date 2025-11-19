@@ -1,0 +1,97 @@
+global:
+  imageRegistry: ""
+  storageClass: ""
+  replicas: 2
+
+deepflow:
+  image: deepflowce/deepflow-server:v7.1.0
+  agentImage: deepflowce/deepflow-agent:v7.1.0
+  ports:
+    data: 20417
+    api: 30880
+    otel: 38086
+
+mysql:
+  image: "mysql:8.0"
+  dbName: "deepflow"
+  user: "root"
+  password: "deepflow"
+
+clickhouse:
+  image: deepflowce/clickhouse-server:23.8.7.24
+
+grafanaIntegration:
+  enabled: true
+  datasourceName: "DeepFlow"
+  datasourceNamespace: "cattle-monitoring-system"
+  dashboardsNamespace: "cattle-dashboards"
+  datasourceIsDefault: false
+
+prometheusIntegration:
+  enabled: true
+  releaseLabel: "rancher-monitoring"
+  scrapeInterval: "30s"
+  serviceMonitorNamespace: "cattle-monitoring-system"
+  ruleNamespace: "cattle-monitoring-system"
+  metricsPath: "/metrics"
+
+traefik:
+  enabled: false
+  image: "traefik:v2.11"
+  replicas: 1
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""
+    annotations: {}
+  resources: {}
+
+serviceLB:
+  enabled: true
+  interface: mgmt-br
+  addressRange:
+    start: 172.16.2.6
+    end: 172.16.2.6
+
+traefik:
+  enabled: true
+  service:
+    type: LoadBalancer
+    loadBalancerIP: 172.16.2.6
+
+deepflowApp:
+  enabled: true
+  image: "deepflowce/deepflow-app:v7.1.0"
+  resources: {}
+  config:
+    logLevel: "info"
+  service:
+    type: ClusterIP 
+  ingress:
+    enabled: true
+    className: "traefik"
+    host: "deepflow.aegisgroup.ch"
+    tls:
+      enabled: true
+      secretName: "deepflow-app-tls"
+
+resources:
+  server:
+    requests:
+      cpu: "800m"
+      memory: "1.5Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  agent:
+    requests:
+      cpu: "300m"
+      memory: "384Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  clickhouse:
+    requests:
+      storage: "10Gi"
+  mysql:
+    requests:
+      storage: "1Gi"

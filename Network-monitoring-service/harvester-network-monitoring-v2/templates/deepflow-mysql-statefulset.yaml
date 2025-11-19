@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-mysql
+  labels:
+    app: deepflow-mysql
+spec:
+  serviceName: {{ .Release.Name }}-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepflow-mysql
+  template:
+    metadata:
+      labels:
+        app: deepflow-mysql
+    spec:
+      containers:
+      - name: mysql
+        image: {{ .Values.mysql.image | quote }}
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: {{ .Values.mysql.password | quote }}
+        - name: MYSQL_DATABASE
+          value: {{ .Values.mysql.dbName | quote }}
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+      {{- if .Values.global.storageClass }}
+      annotations:
+        volume.beta.kubernetes.io/storage-class: {{ .Values.global.storageClass | quote }}
+      {{- end }}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: {{ .Values.resources.mysql.requests.storage | default "1Gi" }}

@@ -39,7 +39,18 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    ```
    Copy the `########## cloud config ############` block – you will paste it into `cloudProvider.cloudConfig`.
 5. **TLS note** – if you access the Harvester API via IP (e.g., `https://192.168.6.5/...`), either reissue Harvester's management certificate with that IP in its SAN list **or** set `insecure-skip-tls-verify: true` under the `cluster` entry in the generated kubeconfig. Otherwise the CCM cannot connect and the taint is never cleared.
-6. **Optional** – prepare an SSH keypair for cloud-init and ensure the Harvester nodes can reach the internet to download qcow2 images.
+6. **Rancher TLS secret** – if you plan to deploy Rancher Manager (`rancherManager.enabled: true`) with `ingress.tlsSource: secret`, you must supply the certificate/key for your Rancher FQDN ahead of time:
+   ```bash
+   export RANCHER_FQDN=rancher.example.com
+   openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+     -keyout tls.key -out tls.crt \
+     -subj "/CN=${RANCHER_FQDN}"
+   kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
+   kubectl create secret tls rancher-private-tls -n cattle-system \
+     --cert=tls.crt --key=tls.key
+   ```
+   Alternatively, edit `manifests/rancher/tls-secret.yaml` or populate `rancherManager.ingress.tlsSecret.certificate`/`privateKey` in `custom_values.yaml` (with `create: true`) so the chart writes the secret during cloud-init. The secret name must match `rancherManager.ingress.tlsSecretName`.
+7. **Optional** – prepare an SSH keypair for cloud-init and ensure the Harvester nodes can reach the internet to download qcow2 images.
 
 ---
 
@@ -57,7 +68,8 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc.
    - `kubeVip.*` – enable + configure the control-plane VIP (ensure the IP is reserved).
    - `cloudProvider.cloudConfig` – paste the kubeconfig from the prerequisite step (or pass it with `--set-file`). Add `insecure-skip-tls-verify: true` if you are using the Harvester API IP.
-   - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager.
+   - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager; use `metallb.values` to pass additional upstream Helm settings (for example `speaker.frr.enabled: false` for pure L2 deployments).
+   - `rancherManager.ingress.*` – set `tlsSource: secret` only when the TLS secret already exists (see prerequisite #6) or when you embed the PEM materials via `rancherManager.ingress.tlsSecret`. For auto-generated certs, switch to `rancher` or `letsEncrypt`.
    - `ssh.*`, `rke2.*`, `tlsSANs`, etc., per your environment.
 4. **Bootstrap SSH Secret + RBAC** (required for the kubeconfig extraction job)
    ```bash

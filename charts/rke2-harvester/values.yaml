@@ -112,6 +112,10 @@ rancherManager:
   ingress:
     tlsSource: secret            # secret/manual/private-ca, letsEncrypt, or rancher
     tlsSecretName: ""          # Required when tlsSource=secret
+    tlsSecret:                 # Optional inline TLS secret material (PEM); requires tlsSource=secret
+      create: false
+      certificate: ""          # Include PEM content, e.g. -----BEGIN CERTIFICATE-----
+      privateKey: ""           # Include PEM content, e.g. -----BEGIN PRIVATE KEY-----
     extraAnnotations: {}
 
 metallb:
@@ -122,6 +126,7 @@ metallb:
   helmChartNamespace: kube-system
   namespace: metallb-system
   valuesContent: ""
+  values: {}
   addressPools: []              # e.g. [{ name: rancher, protocol: layer2, autoAssign: false, addresses: ["192.168.10.6-192.168.10.9"] }]
 
 cloudProvider:

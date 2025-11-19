@@ -1,0 +1,36 @@
+{{- if .Values.traefik.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-traefik
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: traefik
+spec:
+  replicas: {{ .Values.traefik.replicas }}
+  selector:
+    matchLabels:
+      app: traefik
+  template:
+    metadata:
+      labels:
+        app: traefik
+    spec:
+      serviceAccountName: {{ .Release.Name }}-traefik
+      containers:
+      - name: traefik
+        image: {{ .Values.traefik.image | quote }}
+        args:
+        - --entrypoints.web.address=:80
+        - --entrypoints.websecure.address=:443
+        - --providers.kubernetescrd=false
+        - --providers.kubernetesingress.ingressendpoint.publishedservice={{ .Release.Namespace }}/{{ .Release.Name }}-traefik
+        - --accesslog
+        - --log.level=INFO
+        ports:
+        - name: web
+          containerPort: 80
+        - name: websecure
+          containerPort: 443
+        resources: {{- toYaml .Values.traefik.resources | nindent 10 }}
+{{- end }}

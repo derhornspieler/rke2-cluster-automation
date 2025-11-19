@@ -201,6 +201,8 @@ spec:
 {{- $mlb := .Values.metallb | default (dict) -}}
 {{- if $mlb.valuesContent }}
 {{ $mlb.valuesContent }}
+{{- else if $mlb.values }}
+{{ toYaml $mlb.values }}
 {{- else }}
 {}
 {{- end }}
@@ -227,6 +229,63 @@ spec:
 {{- end }}
   valuesContent: |
 {{ include "rke2-harvester.metallbValues" . | indent 4 }}
+{{- end -}}
+
+{{- define "rke2-harvester.metallbAddressPoolsYAML" -}}
+{{- $mlb := .Values.metallb | default dict -}}
+{{- if not ($mlb.enabled | default false) -}}
+{{- /* nothing */ -}}
+{{- else -}}
+{{- $pools := $mlb.addressPools | default list -}}
+{{- $targetNS := $mlb.namespace | default "metallb-system" -}}
+{{- $chartName := "rke2-harvester" -}}
+{{- if .Chart }}
+  {{- if .Chart.Name }}
+    {{- $chartName = .Chart.Name }}
+  {{- end }}
+{{- end }}
+{{- range $idx, $pool := $pools }}
+{{- $poolName := $pool.name | default (printf "%s-pool-%d" $chartName (add $idx 1)) -}}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ $poolName }}
+  namespace: {{ $targetNS }}
+spec:
+  addresses:
+{{- range $addr := $pool.addresses | default list }}
+    - {{ $addr }}
+{{- end }}
+{{- if hasKey $pool "autoAssign" }}
+  autoAssign: {{ $pool.autoAssign }}
+{{- end }}
+{{- if hasKey $pool "avoidBuggyIPs" }}
+  avoidBuggyIPs: {{ $pool.avoidBuggyIPs }}
+{{- end }}
+{{- if $pool.ipAddressPoolSpec }}
+{{ toYaml $pool.ipAddressPoolSpec | indent 2 }}
+{{- end }}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: {{ printf "%s-l2" $poolName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $targetNS }}
+spec:
+  ipAddressPools:
+    - {{ $poolName }}
+{{- if $pool.interfaces }}
+  interfaces:
+{{- range $iface := $pool.interfaces }}
+    - {{ $iface }}
+{{- end }}
+{{- end }}
+{{- if $pool.l2AdvertisementSpec }}
+{{ toYaml $pool.l2AdvertisementSpec | indent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{- define "rke2-harvester.kubeVipStaticManifest" -}}
@@ -341,7 +400,43 @@ write_files:
     content: |
 {{ include "rke2-harvester.kubeVipStaticManifest" . | indent 6 }}
 {{- end }}
-{{- if .Values.rancherManager.enabled }}
+{{- $rm := .Values.rancherManager | default dict -}}
+{{- $rancherEnabled := $rm.enabled | default false -}}
+{{- $rancherNamespace := $rm.namespace | default "cattle-system" -}}
+{{- $mlb := .Values.metallb | default dict -}}
+{{- $metallbEnabled := $mlb.enabled | default false -}}
+{{- $metallbNamespace := $mlb.namespace | default "metallb-system" -}}
+{{- $metallbPools := $mlb.addressPools | default (list) -}}
+{{- $tlsSecret := $rm.ingress.tlsSecret | default dict -}}
+{{- $tlsSecretEnabled := and $rancherEnabled ($tlsSecret.create | default false) $rancherNamespace ($rm.ingress.tlsSecretName | default "") ($tlsSecret.certificate | default "") ($tlsSecret.privateKey | default "") -}}
+{{- if and $rancherEnabled $rancherNamespace }}
+  - path: /var/lib/rancher/rke2/server/manifests/rancher-namespace.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ $rancherNamespace }}
+{{- end }}
+{{- if $tlsSecretEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/rancher-tls-secret.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: {{ $rm.ingress.tlsSecretName }}
+        namespace: {{ $rancherNamespace }}
+      type: kubernetes.io/tls
+      stringData:
+        tls.crt: |
+{{ $tlsSecret.certificate | indent 10 }}
+        tls.key: |
+{{ $tlsSecret.privateKey | indent 10 }}
+{{- end }}
+{{- if $rancherEnabled }}
   - path: /var/lib/rancher/rke2/server/manifests/rancher-manager.yaml
     owner: root:root
     permissions: "0644"
@@ -358,12 +453,29 @@ write_files:
     content: |
 {{ $cloudProvider.cloudConfig | indent 6 }}
 {{- end }}
-{{- if .Values.metallb.enabled }}
+{{- if and $metallbEnabled $metallbNamespace }}
+  - path: /var/lib/rancher/rke2/server/manifests/metallb-namespace.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ $metallbNamespace }}
+{{- end }}
+{{- if $metallbEnabled }}
   - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
     owner: root:root
     permissions: "0644"
     content: |
 {{ include "rke2-harvester.metallbHelmChart" . | indent 6 }}
+{{- end }}
+{{- if and $metallbEnabled (gt (len $metallbPools) 0) }}
+  - path: /var/lib/rancher/rke2/server/manifests/metallb-config.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.metallbAddressPoolsYAML" . | indent 6 }}
 {{- end }}
 chpasswd:
   list: |

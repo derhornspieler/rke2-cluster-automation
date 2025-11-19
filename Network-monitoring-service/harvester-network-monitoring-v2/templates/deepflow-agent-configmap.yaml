@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-agent-config
+  namespace: {{ .Release.Namespace }}
+data:
+  deepflow-agent.yaml: |
+    controller-ips:
+      - '{{ .Release.Name }}-server'
+    controller-port: {{ .Values.deepflow.ports.data }}

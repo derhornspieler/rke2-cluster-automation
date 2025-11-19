@@ -1,0 +1,6 @@
+apiVersion: v2
+name: harvester-network-monitoring
+description: Deploy DeepFlow-based network observability (agents, server, DBs, Grafana) on Harvester
+type: application
+version: 0.4.0
+appVersion: "7.1.0"

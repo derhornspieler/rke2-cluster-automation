@@ -5,15 +5,13 @@ metadata:
   namespace: hvst-mgmt
 spec:
   ipv4Config:
-    serverIP: 192.168.10.2
-    cidr: 192.168.10.0/24
+    serverIP: 172.16.3.2
+    cidr: 172.16.3.0/24
     pool:
-      start: 192.168.10.3
-      end: 192.168.10.253
-      exclude:
-      - 192.168.10.5
-    router: 192.168.10.1
+      start: 172.16.3.10
+      end: 172.16.3.253
+    router: 172.16.3.1
     dns:
-    - 192.168.10.1
+    - 172.16.3.1
     leaseTime: 300
   networkName: hvst-mgmt/vlan2003
