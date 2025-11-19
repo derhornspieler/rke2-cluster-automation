@@ -39,7 +39,9 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    ```
    Copy the `########## cloud config ############` block – you will paste it into `cloudProvider.cloudConfig`.
 5. **TLS note** – if you access the Harvester API via IP (e.g., `https://192.168.6.5/...`), either reissue Harvester's management certificate with that IP in its SAN list **or** set `insecure-skip-tls-verify: true` under the `cluster` entry in the generated kubeconfig. Otherwise the CCM cannot connect and the taint is never cleared.
-6. **Rancher TLS secret** – if you plan to deploy Rancher Manager (`rancherManager.enabled: true`) with `ingress.tlsSource: secret`, you must supply the certificate/key for your Rancher FQDN ahead of time:
+6. **Rancher TLS (cert-manager recommended)** – Rancher requires TLS on its ingress service.
+   - **Recommended:** enable the bundled cert-manager installation by setting `certManager.enabled: true` in `custom_values.yaml`. Provide the desired certificate parameters (`certManager.certificate.*`) and make sure a ClusterIssuer/Issuer referenced by `certManager.certificate.issuerRef` already exists. The chart installs cert-manager and creates the `Certificate` resource so the secret is managed automatically.
+   - **Manual secret:** if you prefer to manage the secret yourself, generate it before the first `helm upgrade --install`:
    ```bash
    export RANCHER_FQDN=rancher.example.com
    openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
@@ -69,7 +71,8 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    - `kubeVip.*` – enable + configure the control-plane VIP (ensure the IP is reserved).
    - `cloudProvider.cloudConfig` – paste the kubeconfig from the prerequisite step (or pass it with `--set-file`). Add `insecure-skip-tls-verify: true` if you are using the Harvester API IP.
    - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager; use `metallb.values` to pass additional upstream Helm settings (for example `speaker.frr.enabled: false` for pure L2 deployments).
-   - `rancherManager.ingress.*` – set `tlsSource: secret` only when the TLS secret already exists (see prerequisite #6) or when you embed the PEM materials via `rancherManager.ingress.tlsSecret`. For auto-generated certs, switch to `rancher` or `letsEncrypt`.
+   - `certManager.*` (optional but recommended) – set `certManager.enabled: true` to have the chart install cert-manager via an RKE2 HelmChart and, if desired, create the `Certificate` custom resource that backs Rancher’s ingress secret. Provide the issuer reference and DNS names that match your Rancher hostname.
+   - `rancherManager.ingress.*` – set `tlsSource: secret` only when the TLS secret already exists (see prerequisite #6) or when you embed the PEM materials via `rancherManager.ingress.tlsSecret`. For cert-manager-managed secrets, keep `tlsSecret.create: false` and point `tlsSecretName` at the Certificate’s target.
    - `ssh.*`, `rke2.*`, `tlsSANs`, etc., per your environment.
 4. **Bootstrap SSH Secret + RBAC** (required for the kubeconfig extraction job)
    ```bash

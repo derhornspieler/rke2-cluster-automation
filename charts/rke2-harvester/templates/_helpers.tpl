@@ -231,6 +231,45 @@ spec:
 {{ include "rke2-harvester.metallbValues" . | indent 4 }}
 {{- end -}}
 
+{{- define "rke2-harvester.certManagerValues" -}}
+{{- $cm := .Values.certManager | default (dict) -}}
+{{- if $cm.valuesContent }}
+{{ $cm.valuesContent }}
+{{- else if $cm.values }}
+{{ toYaml $cm.values }}
+{{- else }}
+{}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.certManagerHelmChart" -}}
+{{- $cm := .Values.certManager | default (dict) -}}
+{{- $helmNS := $cm.helmChartNamespace | default "kube-system" -}}
+{{- $targetNS := $cm.namespace | default "cert-manager" -}}
+{{- $repo := $cm.chartRepo | default "https://charts.jetstack.io" -}}
+{{- $chart := $cm.chartName | default "cert-manager" -}}
+{{- $releaseName := printf "%s-cert-manager" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: {{ $releaseName }}
+  namespace: {{ $helmNS }}
+spec:
+  chart: {{ $chart }}
+  repo: {{ $repo | quote }}
+  targetNamespace: {{ $targetNS }}
+{{- if $cm.chartVersion }}
+  version: {{ $cm.chartVersion | quote }}
+{{- end }}
+  valuesContent: |
+{{ include "rke2-harvester.certManagerValues" . | indent 4 }}
+{{- if $cm.installCRDs }}
+  set:
+    - name: installCRDs
+      value: "true"
+{{- end }}
+{{- end -}}
+
 {{- define "rke2-harvester.metallbAddressPoolsYAML" -}}
 {{- $mlb := .Values.metallb | default dict -}}
 {{- if not ($mlb.enabled | default false) -}}
@@ -407,6 +446,13 @@ write_files:
 {{- $metallbEnabled := $mlb.enabled | default false -}}
 {{- $metallbNamespace := $mlb.namespace | default "metallb-system" -}}
 {{- $metallbPools := $mlb.addressPools | default (list) -}}
+{{- $cm := .Values.certManager | default dict -}}
+{{- $cmEnabled := $cm.enabled | default false -}}
+{{- $cmNamespace := $cm.namespace | default "cert-manager" -}}
+{{- $certificate := $cm.certificate | default dict -}}
+{{- $certSecretName := $certificate.secretName | default "" -}}
+{{- $certIssuer := $certificate.issuerRef | default dict -}}
+{{- $certCreate := and $cmEnabled ($certificate.create | default false) $certSecretName $rancherNamespace -}}
 {{- $tlsSecret := $rm.ingress.tlsSecret | default dict -}}
 {{- $tlsSecretEnabled := and $rancherEnabled ($tlsSecret.create | default false) $rancherNamespace ($rm.ingress.tlsSecretName | default "") ($tlsSecret.certificate | default "") ($tlsSecret.privateKey | default "") -}}
 {{- if and $rancherEnabled $rancherNamespace }}
@@ -435,6 +481,50 @@ write_files:
 {{ $tlsSecret.certificate | indent 10 }}
         tls.key: |
 {{ $tlsSecret.privateKey | indent 10 }}
+{{- end }}
+{{- if and $cmEnabled $cmNamespace }}
+  - path: /var/lib/rancher/rke2/server/manifests/cert-manager-namespace.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ $cmNamespace }}
+{{- end }}
+{{- if $cmEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/cert-manager.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.certManagerHelmChart" . | indent 6 }}
+{{- end }}
+{{- if $certCreate }}
+  - path: /var/lib/rancher/rke2/server/manifests/rancher-cert.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: {{ printf "%s-certificate" $rm.ingress.tlsSecretName | trunc 63 | trimSuffix "-" }}
+        namespace: {{ $rancherNamespace }}
+      spec:
+        secretName: {{ $rm.ingress.tlsSecretName }}
+{{- if $certificate.commonName }}
+        commonName: {{ $certificate.commonName }}
+{{- end }}
+{{- $dns := $certificate.dnsNames | default list }}
+{{- if gt (len $dns) 0 }}
+        dnsNames:
+{{- range $dnsName := $dns }}
+          - {{ $dnsName }}
+{{- end }}
+{{- end }}
+        issuerRef:
+          name: {{ $certIssuer.name | default "rancher-ca-issuer" }}
+          kind: {{ $certIssuer.kind | default "ClusterIssuer" }}
+          group: {{ $certIssuer.group | default "cert-manager.io" }}
 {{- end }}
 {{- if $rancherEnabled }}
   - path: /var/lib/rancher/rke2/server/manifests/rancher-manager.yaml

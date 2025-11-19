@@ -129,6 +129,26 @@ metallb:
   values: {}
   addressPools: []              # e.g. [{ name: rancher, protocol: layer2, autoAssign: false, addresses: ["192.168.10.6-192.168.10.9"] }]
 
+certManager:
+  enabled: false
+  chartRepo: https://charts.jetstack.io
+  chartName: cert-manager
+  chartVersion: ""
+  helmChartNamespace: kube-system
+  namespace: cert-manager
+  installCRDs: true
+  valuesContent: ""
+  values: {}
+  certificate:
+    create: false
+    secretName: ""
+    commonName: ""
+    dnsNames: []
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+
 cloudProvider:
   cloudConfig: ""              # Inline kubeconfig for Harvester CCM (optional)
   configPath: /var/lib/rancher/rke2/etc/config-files/cloud-provider-config
