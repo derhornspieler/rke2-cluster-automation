@@ -54,11 +54,14 @@
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
-{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $cpMacs "index" $i) -}}
 {{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $cpIPs "index" $i) -}}
 {{- $rancherIP := include "rke2-harvester.valueForIndex" (dict "list" $rancherCpIPs "index" $i) -}}
 {{- $rancherHasIP := and $rancherEnabled $rancherIP -}}
 {{- $forceDhcp := and (not $staticIP) $cpDhcp -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $cpMacs "index" $i) -}}
+{{- if and $forceDhcp (not $macAddr) }}
+{{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vmName "namespace" $namespace) -}}
+{{- end }}
 {{- $data := include "rke2-harvester.virtualMachine" (dict
   "vmName" $vmName
   "namespace" $namespace
@@ -100,11 +103,14 @@
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-wk-%d" $namePrefix $vmOrdinal -}}
 {{- $pvcName := printf "%s-rootdisk" $vmName -}}
-{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $wkMacs "index" $i) -}}
 {{- $staticIP := include "rke2-harvester.valueForIndex" (dict "list" $wkIPs "index" $i) -}}
 {{- $rancherIP := include "rke2-harvester.valueForIndex" (dict "list" $rancherWkIPs "index" $i) -}}
 {{- $rancherHasIP := and $rancherEnabled $rancherIP -}}
 {{- $forceDhcp := and (not $staticIP) $wkDhcp -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $wkMacs "index" $i) -}}
+{{- if and $forceDhcp (not $macAddr) }}
+{{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vmName "namespace" $namespace) -}}
+{{- end }}
 {{- $data := include "rke2-harvester.virtualMachine" (dict
   "vmName" $vmName
   "namespace" $namespace

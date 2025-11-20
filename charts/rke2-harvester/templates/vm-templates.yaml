@@ -1,4 +1,9 @@
-{{- if .Values.harvesterTemplates.enabled | default true }}
+{{- $ht := .Values.harvesterTemplates | default (dict) -}}
+{{- $templatesEnabled := true -}}
+{{- if hasKey $ht "enabled" }}
+{{- $templatesEnabled = $ht.enabled -}}
+{{- end }}
+{{- if $templatesEnabled }}
 {{- $fullname := include "rke2-harvester.fullname" . -}}
 {{- $cloudConfig := printf "%s-cloud-config" $fullname -}}
 {{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}

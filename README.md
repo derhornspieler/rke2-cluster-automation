@@ -67,7 +67,7 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    - `vmNamePrefix` – friendly VM prefix (defaults to the Helm release name).
    - `storage.*` – disk sizing per role.
    - `replicaCounts.*` and `resources.*` – control the number/sizing of control-plane vs worker VMs.
-   - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc. Workers require either static IPv4 addresses here or a NAD backed by DHCP/IPAM; otherwise they will only receive link-local IPv6 addresses. Set `networks.vm.dhcp.worker: true` if you want the chart to emit cloud-init network data that requests DHCP on the worker NIC (and provide MAC addresses via `networks.vm.macAddresses.worker` so the chart can create the required `VirtualMachineNetworkConfig` CRDs for Harvester’s DHCP addon).
+   - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc. Workers require either static IPv4 addresses here or a NAD backed by DHCP/IPAM; otherwise they will only receive link-local IPv6 addresses. Set `networks.vm.dhcp.worker: true` if you want the chart to emit cloud-init network data that requests DHCP on the worker NIC. When DHCP is enabled the chart automatically generates locally-administered MAC addresses (unless you provide your own via `networks.vm.macAddresses.*`) and creates the matching `VirtualMachineNetworkConfig` resources required by Harvester’s DHCP addon.
    - `kubeVip.*` – enable + configure the control-plane VIP (ensure the IP is reserved).
    - `cloudProvider.cloudConfig` – paste the kubeconfig from the prerequisite step (or pass it with `--set-file`). Add `insecure-skip-tls-verify: true` if you are using the Harvester API IP.
    - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager; use `metallb.values` to pass additional upstream Helm settings (for example `speaker.frr.enabled: false` for pure L2 deployments).
@@ -129,7 +129,7 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    helm uninstall rke2 -n rke2
    kubectl delete namespace rke2
    ```
-2. Optionally remove any cluster-scoped objects you created earlier:
+2. Optionally remove any cluster-scoped objects you created earlier (e.g. the CCM clusterrolebinding):
    ```bash
    kubectl -n harvester-public delete virtualmachineimage rocky-9-cloudimg
    kubectl -n harvester-public delete virtualmachineimage ubuntu-22.04-cloudimg

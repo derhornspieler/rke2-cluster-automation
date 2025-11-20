@@ -14,6 +14,10 @@
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
 {{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $macCP "index" $i) -}}
+{{- if and (not $macAddr) $cpDhcp }}
+{{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vmName "namespace" $namespace) -}}
+{{- end }}
+{{- if $macAddr }}
 ---
 apiVersion: network.harvesterhci.io/v1alpha1
 kind: VirtualMachineNetworkConfig
@@ -22,10 +26,11 @@ metadata:
   namespace: {{ $namespace }}
 spec:
   vmName: {{ $vmName }}
-  networkConfig:
+  networkConfigs:
     - networkName: {{ $vmNetwork }}
 {{- if $macAddr }}
       macAddress: {{ $macAddr }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -34,6 +39,10 @@ spec:
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-wk-%d" $namePrefix $vmOrdinal -}}
 {{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $macWK "index" $i) -}}
+{{- if not $macAddr }}
+{{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vmName "namespace" $namespace) -}}
+{{- end }}
+{{- if $macAddr }}
 ---
 apiVersion: network.harvesterhci.io/v1alpha1
 kind: VirtualMachineNetworkConfig
@@ -42,10 +51,11 @@ metadata:
   namespace: {{ $namespace }}
 spec:
   vmName: {{ $vmName }}
-  networkConfig:
+  networkConfigs:
     - networkName: {{ $vmNetwork }}
 {{- if $macAddr }}
       macAddress: {{ $macAddr }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

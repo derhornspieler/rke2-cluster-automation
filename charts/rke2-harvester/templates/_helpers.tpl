@@ -99,8 +99,25 @@ ethernets:
 {{- end -}}
 {{- end -}}
 
+{{- define "rke2-harvester.generatedMac" -}}
+{{- $vmName := .vmName -}}
+{{- $namespace := .namespace | default "" -}}
+{{- $seed := printf "%s/%s" $namespace $vmName -}}
+{{- $hash := sha256sum $seed | lower -}}
+{{- $p2 := substr 0 2 $hash -}}
+{{- $p3 := substr 2 4 $hash -}}
+{{- $p4 := substr 4 6 $hash -}}
+{{- $p5 := substr 6 8 $hash -}}
+{{- $p6 := substr 8 10 $hash -}}
+{{- printf "02:%s:%s:%s:%s:%s" $p2 $p3 $p4 $p5 $p6 -}}
+{{- end -}}
+
 {{- define "rke2-harvester.virtualMachine" -}}
 {{- $vm := . -}}
+{{- $macAddr := $vm.macAddr -}}
+{{- if and (not $macAddr) $vm.forceDhcp }}
+{{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vm.vmName "namespace" $vm.namespace) -}}
+{{- end }}
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -172,8 +189,8 @@ spec:
           - name: primary
             bridge: {}
             model: virtio
-{{- if $vm.macAddr }}
-            macAddress: {{ $vm.macAddr }}
+{{- if $macAddr }}
+            macAddress: {{ $macAddr }}
 {{- end }}
 {{- if $vm.rancherEnabled }}
           - name: rancher
