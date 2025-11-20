@@ -32,6 +32,9 @@ networks:
     prefix: 24                       # CIDR prefix length for static IPs
     gateway: ""                      # Optional gateway inserted into networkData
     nameservers: []                  # Optional DNS servers for static IPs
+    dhcp:
+      controlPlane: false
+      worker: false
     macAddresses:
       controlPlane: []               # Optional list of MACs per control-plane VM
       worker: []                     # Optional list of MACs per worker VM
@@ -152,3 +155,10 @@ certManager:
 cloudProvider:
   cloudConfig: ""              # Inline kubeconfig for Harvester CCM (optional)
   configPath: /var/lib/rancher/rke2/etc/config-files/cloud-provider-config
+
+vmDeployment:
+  image: alpine/kubectl:1.34.2
+  backoffLimit: 3
+
+harvesterTemplates:
+  enabled: true

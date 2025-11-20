@@ -1,0 +1,52 @@
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $vmNetwork := printf "%s/%s" .Values.networks.vm.namespace .Values.networks.vm.name -}}
+{{- $cpCount := .Values.replicaCounts.controlPlane | int -}}
+{{- $wkCount := .Values.replicaCounts.worker | int -}}
+{{- $macCP := .Values.networks.vm.macAddresses.controlPlane | default (list) -}}
+{{- $macWK := .Values.networks.vm.macAddresses.worker | default (list) -}}
+{{- $dhcp := .Values.networks.vm.dhcp | default (dict) -}}
+{{- $cpDhcp := $dhcp.controlPlane | default false -}}
+{{- $wkDhcp := $dhcp.worker | default false -}}
+{{- if or $cpDhcp $wkDhcp }}
+{{- range $i := until $cpCount }}
+{{- if $cpDhcp }}
+{{- $vmOrdinal := add $i 1 -}}
+{{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $macCP "index" $i) -}}
+---
+apiVersion: network.harvesterhci.io/v1alpha1
+kind: VirtualMachineNetworkConfig
+metadata:
+  name: {{ $vmName }}
+  namespace: {{ $namespace }}
+spec:
+  vmName: {{ $vmName }}
+  networkConfig:
+    - networkName: {{ $vmNetwork }}
+{{- if $macAddr }}
+      macAddress: {{ $macAddr }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $i := until $wkCount }}
+{{- if $wkDhcp }}
+{{- $vmOrdinal := add $i 1 -}}
+{{- $vmName := printf "%s-wk-%d" $namePrefix $vmOrdinal -}}
+{{- $macAddr := include "rke2-harvester.macForIndex" (dict "list" $macWK "index" $i) -}}
+---
+apiVersion: network.harvesterhci.io/v1alpha1
+kind: VirtualMachineNetworkConfig
+metadata:
+  name: {{ $vmName }}
+  namespace: {{ $namespace }}
+spec:
+  vmName: {{ $vmName }}
+  networkConfig:
+    - networkName: {{ $vmNetwork }}
+{{- if $macAddr }}
+      macAddress: {{ $macAddr }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,122 @@
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $cmName := printf "%s-vm-manifests" (include "rke2-harvester.fullname" .) -}}
+{{- $saName := printf "%s-vm-ops" (include "rke2-harvester.fullname" .) -}}
+{{- $jobName := printf "%s-vm-apply" (include "rke2-harvester.fullname" .) -}}
+{{- $applyImage := .Values.vmDeployment.image | default "rancher/kubectl:v1.31.3" -}}
+{{- $backoff := .Values.vmDeployment.backoffLimit | default 3 -}}
+{{- $cpCount := int .Values.replicaCounts.controlPlane -}}
+{{- $wkCount := int .Values.replicaCounts.worker -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $saName }}
+  namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $saName }}
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $saName }}
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $saName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $jobName }}
+  namespace: {{ $namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $backoff }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $namePrefix }}
+        app.kubernetes.io/component: vm-apply
+    spec:
+      serviceAccountName: {{ $saName }}
+      restartPolicy: Never
+      volumes:
+        - name: vm-manifests
+          secret:
+            secretName: {{ $cmName }}
+      containers:
+        - name: vm-apply
+          image: {{ $applyImage }}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: vm-manifests
+              mountPath: /vm-manifests
+          command:
+            - /bin/sh
+          args:
+            - -c
+            - |
+              set -eu
+              MANIFEST_DIR="/vm-manifests"
+              NAMESPACE="{{ $namespace }}"
+              PREFIX="{{ $namePrefix }}"
+              CP_COUNT={{ $cpCount }}
+              WK_COUNT={{ $wkCount }}
+              DESIRED_FILE="$(mktemp)"
+              run_apply() {
+                name="$1"
+                file="$2"
+                if [ ! -f "$file" ]; then
+                  echo "WARN: missing manifest $file for $name" >&2
+                  return
+                fi
+                kubectl apply -n "$NAMESPACE" -f "$file"
+                kubectl get vm "$name" -n "$NAMESPACE" >/dev/null
+                echo "$name" >>"$DESIRED_FILE"
+                echo "Ensured $name is defined"
+              }
+              if [ "$CP_COUNT" -gt 0 ]; then
+                i=1
+                while [ "$i" -le "$CP_COUNT" ]; do
+                  name="${PREFIX}-cp-${i}"
+                  run_apply "$name" "${MANIFEST_DIR}/${name}.yaml"
+                  i=$((i + 1))
+                done
+              fi
+              if [ "$WK_COUNT" -gt 0 ]; then
+                i=1
+                while [ "$i" -le "$WK_COUNT" ]; do
+                  name="${PREFIX}-wk-${i}"
+                  run_apply "$name" "${MANIFEST_DIR}/${name}.yaml"
+                  i=$((i + 1))
+                done
+              fi
+              if [ -s "$DESIRED_FILE" ]; then
+                kubectl -n "$NAMESPACE" get vm -l app.kubernetes.io/name="$PREFIX" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' >/tmp/existing || true
+                if [ -s /tmp/existing ]; then
+                  while IFS= read -r vm; do
+                    [ -z "$vm" ] && continue
+                    if ! grep -Fxq "$vm" "$DESIRED_FILE"; then
+                      echo "Pruning obsolete VM $vm"
+                      kubectl -n "$NAMESPACE" delete vm "$vm" --ignore-not-found
+                    fi
+                  done </tmp/existing
+                fi
+              fi

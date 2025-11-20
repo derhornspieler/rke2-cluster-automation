@@ -67,12 +67,14 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    - `vmNamePrefix` – friendly VM prefix (defaults to the Helm release name).
    - `storage.*` – disk sizing per role.
    - `replicaCounts.*` and `resources.*` – control the number/sizing of control-plane vs worker VMs.
-   - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc.
+   - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc. Workers require either static IPv4 addresses here or a NAD backed by DHCP/IPAM; otherwise they will only receive link-local IPv6 addresses. Set `networks.vm.dhcp.worker: true` if you want the chart to emit cloud-init network data that requests DHCP on the worker NIC (and provide MAC addresses via `networks.vm.macAddresses.worker` so the chart can create the required `VirtualMachineNetworkConfig` CRDs for Harvester’s DHCP addon).
    - `kubeVip.*` – enable + configure the control-plane VIP (ensure the IP is reserved).
    - `cloudProvider.cloudConfig` – paste the kubeconfig from the prerequisite step (or pass it with `--set-file`). Add `insecure-skip-tls-verify: true` if you are using the Harvester API IP.
    - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager; use `metallb.values` to pass additional upstream Helm settings (for example `speaker.frr.enabled: false` for pure L2 deployments).
    - `certManager.*` (optional but recommended) – set `certManager.enabled: true` to have the chart install cert-manager via an RKE2 HelmChart and, if desired, create the `Certificate` custom resource that backs Rancher’s ingress secret. Provide the issuer reference and DNS names that match your Rancher hostname.
    - `rancherManager.ingress.*` – set `tlsSource: secret` only when the TLS secret already exists (see prerequisite #6) or when you embed the PEM materials via `rancherManager.ingress.tlsSecret`. For cert-manager-managed secrets, keep `tlsSecret.create: false` and point `tlsSecretName` at the Certificate’s target.
+   - `vmDeployment.*` – image/backoff for the lightweight kubectl job that sequentially creates the Harvester VMs. Pick an image that includes `/bin/sh` (e.g. `alpine/kubectl:1.34.2`) so the script can run.
+   - `harvesterTemplates.enabled` – set `false` if you do **not** want Helm to create/replace Harvester `VirtualMachineTemplate`/`Version` objects (useful when Harvester refuses to delete default template versions during upgrades).
    - `ssh.*`, `rke2.*`, `tlsSANs`, etc., per your environment.
 4. **Bootstrap SSH Secret + RBAC** (required for the kubeconfig extraction job)
    ```bash
@@ -92,7 +94,7 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
    ```
    Wait for the VM to reach `STATUS=Running`. If `kubeVip.enabled: true`, test it from a Harvester host: `curl -k https://<vip>:6443/version`.
 
-2. **Scale to desired size** – edit `replicaCounts.controlPlane` / `.worker` and re-run the same `helm upgrade --install` command; Helm reconciles the VM set and preserves PVCs.
+2. **Scale to desired size** – edit `replicaCounts.controlPlane` / `.worker` and re-run the same `helm upgrade --install` command. A post-install hook job re-applies each VM manifest sequentially and prunes obsolete entries, so the final VM count only depends on your values file.
 
 3. **Bootstrap the guest kubeconfig**
    ```bash
@@ -105,7 +107,7 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
 
 4. **Validate the Harvester CCM** – after the VMs boot, the Harvester cloud-provider pod (`harvester-cloud-provider-*` in `kube-system`) should reach `Running` and the `node.cloudprovider.kubernetes.io/uninitialized` taint should disappear. If it remains, double-check TLS (SANs vs IP) and that the ServiceAccount from the prerequisites exists and has the clusterrolebinding.
 
-> 📝 Still using the manifest-only workflow? Apply `manifests/rke2-config/configmap.yaml` and `manifests/vm-templates/`, then manage your own `VirtualMachine` CRs with `kubectl apply`. Helm users can skip those directories because the chart creates the cloud-config secret, VM templates, and the `kubevirt.io/VirtualMachine` objects for you.
+> 📝 Still using the manifest-only workflow? Apply `manifests/rke2-config/configmap.yaml` and `manifests/vm-templates/`, then manage your own `VirtualMachine` CRs with `kubectl apply`. Helm users can skip those directories because the chart creates the cloud-config secret, VM templates (when `harvesterTemplates.enabled: true`), and the VM resources for you.
 
 ---
 
@@ -114,12 +116,15 @@ This repo contains manifests plus a Helm chart that provision an RKE2 management
 - **Scale up/down:** change `replicaCounts` and rerun `helm upgrade --install ...`.
 - **Rolling OS image:** import a new `VirtualMachineImage`, update `image.name`, rerun Helm; Harvester recreates VMs on the new template.
 - **CI/CD:** `.gitlab-ci.yml` shows a lint → template → apply → verify pipeline using the same chart.
+- **Hooks:** the chart uses two Helm hooks:
+  - `post-install/post-upgrade` job – applies each VM manifest sequentially (control-planes first, then workers) and deletes any extra VMs. If this job ever fails you can remove it with `kubectl -n <ns> delete job <release>-rke2-harvester-vm-apply` before rerunning Helm.
+  - `pre-delete` job – removes all VMs and their PVCs with `kubectl delete vm,pvc -l app.kubernetes.io/name=<prefix>`. Helm keeps failed hooks around, so clean up any stale hook jobs/pods before reinstalling.
 
 ---
 
 ## 5. Cleanup
 
-1. Remove the Helm release and guest namespace (deletes the VMs, templates, secrets):
+1. Remove the Helm release and guest namespace (the pre-delete hook deletes the VMs/PVCs first, then Helm removes the remaining resources):
    ```bash
    helm uninstall rke2 -n rke2
    kubectl delete namespace rke2

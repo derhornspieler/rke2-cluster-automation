@@ -99,6 +99,117 @@ ethernets:
 {{- end -}}
 {{- end -}}
 
+{{- define "rke2-harvester.virtualMachine" -}}
+{{- $vm := . -}}
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ $vm.vmName }}
+  namespace: {{ $vm.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $vm.namePrefix }}
+    app.kubernetes.io/component: {{ $vm.component }}
+    harvesterhci.io/vmName: {{ $vm.vmName }}
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $vm.pvcName "imageID" $vm.imageID "storageClass" $vm.storageClass "accessMode" $vm.accessMode "volumeMode" $vm.volumeMode "storageSize" $vm.storageSize) | indent 6 }}
+{{- if $vm.enableHotplug }}
+    harvesterhci.io/enableCPUAndMemoryHotplug: "true"
+{{- end }}
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $vm.namePrefix }}
+        app.kubernetes.io/component: {{ $vm.component }}
+        harvesterhci.io/rke2-role: {{ $vm.component }}
+        harvesterhci.io/vmName: {{ $vm.vmName }}
+    spec:
+      hostname: {{ $vm.vmName }}
+      evictionStrategy: LiveMigrateIfPossible
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: {{ $vm.namePrefix }}
+            app.kubernetes.io/component: {{ $vm.component }}
+      domain:
+        cpu:
+{{- if $vm.enableHotplug }}
+          sockets: {{ $vm.cpuCores }}
+          cores: 1
+          threads: 1
+          maxSockets: {{ $vm.cpuMaxSockets }}
+{{- else }}
+          cores: {{ $vm.cpuCores }}
+{{- end }}
+        resources:
+          limits:
+            memory: {{ $vm.memoryLimit }}
+            cpu: {{ $vm.cpuLimit }}
+          requests:
+            memory: {{ $vm.memoryRequest }}
+            cpu: {{ $vm.cpuCores }}
+{{- if $vm.enableHotplug }}
+        memory:
+          guest: {{ $vm.memoryRequest }}
+          maxGuest: {{ $vm.memoryMax }}
+{{- end }}
+        devices:
+          autoattachPodInterface: false
+          disks:
+          - name: rootdisk
+            bootOrder: 1
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: primary
+            bridge: {}
+            model: virtio
+{{- if $vm.macAddr }}
+            macAddress: {{ $vm.macAddr }}
+{{- end }}
+{{- if $vm.rancherEnabled }}
+          - name: rancher
+            bridge: {}
+            model: virtio
+{{- end }}
+      networks:
+      - name: primary
+        multus:
+          networkName: {{ $vm.vmNetwork }}
+{{- if $vm.rancherEnabled }}
+      - name: rancher
+        multus:
+          networkName: {{ $vm.rancherNetwork }}
+{{- end }}
+      volumes:
+      - name: rootdisk
+        persistentVolumeClaim:
+          claimName: {{ $vm.pvcName }}
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: {{ $vm.cloudConfig }}
+{{- if or $vm.staticIP $vm.rancherHasIP $vm.forceDhcp }}
+          networkData: |
+{{- $secondary := dict -}}
+{{- if $vm.rancherHasIP }}
+{{- $_ := set $secondary "address" $vm.rancherIP -}}
+{{- $_ := set $secondary "prefix" $vm.rancherPrefix -}}
+{{- $_ := set $secondary "interface" $vm.rancherInterface -}}
+{{- $_ := set $secondary "routes" $vm.rancherRoutes -}}
+{{- end }}
+{{ include "rke2-harvester.networkData" (dict "address" $vm.staticIP "prefix" $vm.prefix "gateway" $vm.gateway "dns" $vm.dns "interface" $vm.netInterface "secondary" $secondary) | indent 12 }}
+{{- end }}
+{{- end -}}
+
 {{- define "rke2-harvester.kubeVipRBACManifest" -}}
 {{- $vip := .Values.kubeVip | default dict -}}
 {{- $enabled := and ($vip.enabled | default false) $vip.address -}}

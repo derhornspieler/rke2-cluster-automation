@@ -1,3 +1,4 @@
+{{- if .Values.harvesterTemplates.enabled | default true }}
 {{- $fullname := include "rke2-harvester.fullname" . -}}
 {{- $cloudConfig := printf "%s-cloud-config" $fullname -}}
 {{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
@@ -112,4 +113,5 @@ spec:
               secretRef:
                 name: {{ $cloudConfig }}
 {{ end }}
+{{- end }}
 {{- end }}

@@ -1,0 +1,39 @@
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
+{{- $saName := printf "%s-vm-ops" (include "rke2-harvester.fullname" .) -}}
+{{- $jobName := printf "%s-vm-cleanup" (include "rke2-harvester.fullname" .) -}}
+{{- $applyImage := .Values.vmDeployment.image | default "rancher/kubectl:v1.31.3" -}}
+{{- $backoff := .Values.vmDeployment.backoffLimit | default 3 -}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $jobName }}
+  namespace: {{ $namespace }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $backoff }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $namePrefix }}
+        app.kubernetes.io/component: vm-cleanup
+    spec:
+      serviceAccountName: {{ $saName }}
+      restartPolicy: Never
+      containers:
+        - name: vm-cleanup
+          image: {{ $applyImage }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+          args:
+            - -c
+            - |
+              set -eu
+              NAMESPACE="{{ $namespace }}"
+              PREFIX="{{ $namePrefix }}"
+              kubectl -n "$NAMESPACE" delete vm -l app.kubernetes.io/name="$PREFIX" --ignore-not-found --wait=false || true
+              kubectl -n "$NAMESPACE" delete pvc -l app.kubernetes.io/name="$PREFIX" --ignore-not-found --wait=false || true
