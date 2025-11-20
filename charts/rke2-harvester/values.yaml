@@ -108,6 +108,11 @@ rancherManager:
   hostname: ""
   bootstrapPassword: ""
   replicas: 3
+  rancherManager:
+    extraEnv:
+      - name: CATTLE_SERVER_URL
+        value: https://rancher.yourdomain.com
+
   service:
     type: LoadBalancer
     loadBalancerIP: ""
@@ -151,6 +156,13 @@ certManager:
       name: ""
       kind: ClusterIssuer
       group: cert-manager.io
+  ca:
+    create: false
+    secretName: ""
+    commonName: ""
+    issuerName: ""
+    selfSignedIssuerName: ""
+    certificateName: ""
 
 cloudProvider:
   cloudConfig: ""              # Inline kubeconfig for Harvester CCM (optional)

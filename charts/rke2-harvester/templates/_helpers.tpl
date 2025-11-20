@@ -299,6 +299,10 @@ subjects:
 {{- $_ := set $service "annotations" $svc.annotations -}}
 {{- end }}
 {{- $_ := set $values "service" $service -}}
+{{- $extraEnv := $rm.extraEnv | default (list) -}}
+{{- if gt (len $extraEnv) 0 }}
+{{- $_ := set $values "extraEnv" $extraEnv -}}
+{{- end }}
 {{ toYaml $values }}
 {{- end -}}
 
@@ -393,8 +397,7 @@ spec:
 {{ include "rke2-harvester.certManagerValues" . | indent 4 }}
 {{- if $cm.installCRDs }}
   set:
-    - name: installCRDs
-      value: "true"
+    installCRDs: "true"
 {{- end }}
 {{- end -}}
 
@@ -581,6 +584,9 @@ write_files:
 {{- $certSecretName := $certificate.secretName | default "" -}}
 {{- $certIssuer := $certificate.issuerRef | default dict -}}
 {{- $certCreate := and $cmEnabled ($certificate.create | default false) $certSecretName $rancherNamespace -}}
+{{- $ca := $cm.ca | default dict -}}
+{{- $caSecret := $ca.secretName | default "" -}}
+{{- $caEnabled := and $cmEnabled $rancherEnabled ($ca.create | default false) $caSecret $rancherNamespace -}}
 {{- $tlsSecret := $rm.ingress.tlsSecret | default dict -}}
 {{- $tlsSecretEnabled := and $rancherEnabled ($tlsSecret.create | default false) $rancherNamespace ($rm.ingress.tlsSecretName | default "") ($tlsSecret.certificate | default "") ($tlsSecret.privateKey | default "") -}}
 {{- if and $rancherEnabled $rancherNamespace }}
@@ -626,6 +632,41 @@ write_files:
     permissions: "0644"
     content: |
 {{ include "rke2-harvester.certManagerHelmChart" . | indent 6 }}
+{{- end }}
+{{- if $caEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/rancher-ca.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: cert-manager.io/v1
+      kind: Issuer
+      metadata:
+        name: {{ $ca.selfSignedIssuerName | default (printf "%s-ca-selfsigned" (include "rke2-harvester.fullname" .)) }}
+        namespace: {{ $rancherNamespace }}
+      spec:
+        selfSigned: {}
+      ---
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: {{ $ca.certificateName | default (printf "%s-ca" (include "rke2-harvester.fullname" .)) }}
+        namespace: {{ $rancherNamespace }}
+      spec:
+        isCA: true
+        commonName: {{ $ca.commonName | default (printf "%s-ca" (include "rke2-harvester.fullname" .)) }}
+        secretName: {{ $caSecret }}
+        issuerRef:
+          kind: Issuer
+          name: {{ $ca.selfSignedIssuerName | default (printf "%s-ca-selfsigned" (include "rke2-harvester.fullname" .)) }}
+      ---
+      apiVersion: cert-manager.io/v1
+      kind: Issuer
+      metadata:
+        name: {{ $ca.issuerName | default (printf "%s-ca-issuer" (include "rke2-harvester.fullname" .)) }}
+        namespace: {{ $rancherNamespace }}
+      spec:
+        ca:
+          secretName: {{ $caSecret }}
 {{- end }}
 {{- if $certCreate }}
   - path: /var/lib/rancher/rke2/server/manifests/rancher-cert.yaml
