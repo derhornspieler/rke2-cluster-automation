@@ -66,6 +66,7 @@ wait_for_vm_images() {
     local name="${ref##*/}"
     namespace=${namespace:-default}
     local start last_progress="" last_log=0
+    start=$(date +%s)
     log "Waiting for VirtualMachineImage ${namespace}/${name} to finish downloading."
 
     while true; do
