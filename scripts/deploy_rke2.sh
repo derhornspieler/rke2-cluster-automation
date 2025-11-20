@@ -11,6 +11,11 @@ RUN_ADDON=true
 SKIP_PREREQS=false
 SKIP_BOOTSTRAP=false
 
+IMAGE_MANIFESTS=(
+  "${REPO_ROOT}/manifests/image/ubuntu.yaml"
+  "${REPO_ROOT}/manifests/image/rocky9.yaml"
+)
+
 usage() {
   cat <<'EOF'
 Usage: scripts/deploy_rke2.sh [options]
@@ -45,15 +50,92 @@ require_bin() {
 }
 
 log() {
-  printf '[%(%Y-%m-%dT%H:%M:%S%z)T] %s\n' -1 "$*"
+  local timestamp
+  timestamp="$(date +"%Y-%m-%dT%H:%M:%S%z")"
+  printf '[%s] %s\n' "${timestamp}" "$*"
+}
+
+wait_for_vm_images() {
+  local images=("$@")
+  ((${#images[@]} == 0)) && return
+
+  local ref
+  for ref in "${images[@]}"; do
+    [[ -z "$ref" ]] && continue
+    local namespace="${ref%%/*}"
+    local name="${ref##*/}"
+    namespace=${namespace:-default}
+    local start last_progress="" last_log=0
+    log "Waiting for VirtualMachineImage ${namespace}/${name} to finish downloading."
+
+    while true; do
+      local json
+      if ! json=$(kubectl -n "${namespace}" get virtualmachineimage "${name}" -o json 2>/dev/null); then
+        log "VirtualMachineImage ${namespace}/${name} not found yet; waiting..."
+        sleep 5
+        continue
+      fi
+
+      local summary
+      summary=$(jq -r '[any(.status.conditions[]?; .type=="Imported" and .status=="True"),
+                        any(.status.conditions[]?; .type=="RetryLimitExceeded" and .status=="True"),
+                        any(.status.conditions[]?; .type=="BackingImageMissing" and .status=="True"),
+                        .status.progress // 0,
+                        .status.failed // 0] | @tsv' <<<"${json}")
+      local imported retryExceeded backingMissing progress failedCount
+      IFS=$'\t' read -r imported retryExceeded backingMissing progress failedCount <<<"${summary}"
+
+      if [[ "${retryExceeded}" == "true" ]]; then
+        log "Image ${namespace}/${name} failed to import (RetryLimitExceeded condition set)." >&2
+        exit 1
+      fi
+      if [[ "${backingMissing}" == "true" ]]; then
+        log "Image ${namespace}/${name} reports BackingImageMissing; verify Harvester backing images/storage." >&2
+        exit 1
+      fi
+      if [[ "${imported}" == "true" ]]; then
+        log "Image ${namespace}/${name} is ready (progress ${progress}%, failed attempts ${failedCount})."
+        break
+      fi
+
+      local now
+      now=$(date +%s)
+      if (( now - start > WAIT_SECONDS )); then
+        log "Timed out waiting for image ${namespace}/${name} to finish downloading (last progress ${progress}%)." >&2
+        exit 1
+      fi
+      if [[ "${progress}" != "${last_progress}" ]]; then
+        log "Image ${namespace}/${name} import progress: ${progress}%"
+        last_progress="${progress}"
+        last_log=${now}
+      elif (( now - last_log >= 60 )); then
+        log "Image ${namespace}/${name} still importing (progress ${progress}%)."
+        last_log=${now}
+      fi
+      sleep 10
+    done
+  done
 }
 
 run_prereqs() {
   $SKIP_PREREQS && { log "Skipping prerequisite objects."; return; }
   log "Ensuring prerequisites exist on the Harvester management cluster (namespace: ${NAMESPACE})."
   kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${NAMESPACE}"
-  kubectl apply -f "${REPO_ROOT}/manifests/image/ubuntu.yaml"
-  kubectl apply -f "${REPO_ROOT}/manifests/image/rocky9.yaml"
+  local vm_images=()
+  local manifest
+  for manifest in "${IMAGE_MANIFESTS[@]}"; do
+    if [[ ! -f "${manifest}" ]]; then
+      log "Image manifest ${manifest} not found; skipping."
+      continue
+    fi
+    local image_name image_namespace
+    image_name=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.name}')
+    image_namespace=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.namespace}')
+    image_namespace=${image_namespace:-default}
+    kubectl apply -f "${manifest}"
+    vm_images+=("${image_namespace}/${image_name}")
+  done
+  wait_for_vm_images "${vm_images[@]}"
   kubectl apply -f "${REPO_ROOT}/manifests/network/networks.yaml"
   kubectl apply -f "${REPO_ROOT}/manifests/network/vmnet-vlan2003-ippool.yaml"
   kubectl -n "${NAMESPACE}" create serviceaccount rke2-mgmt-cloud-provider \
