@@ -7,5 +7,5 @@ spec:
   displayName: Rocky Linux 9 Cloud Image
   backend: backingimage
   sourceType: download
-  url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2
+  url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2
   # Harvester will import the image the first time this manifest is applied.

@@ -133,7 +133,11 @@ run_prereqs() {
     image_name=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.name}')
     image_namespace=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.namespace}')
     image_namespace=${image_namespace:-default}
-    kubectl apply -f "${manifest}"
+    if kubectl -n "${image_namespace}" get virtualmachineimage "${image_name}" >/dev/null 2>&1; then
+      log "VirtualMachineImage ${image_namespace}/${image_name} already exists; skipping apply."
+    else
+      kubectl apply -f "${manifest}"
+    fi
     vm_images+=("${image_namespace}/${image_name}")
   done
   wait_for_vm_images "${vm_images[@]}"
