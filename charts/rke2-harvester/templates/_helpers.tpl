@@ -278,7 +278,7 @@ subjects:
 {{- end }}
 {{- $_ := set $values "replicas" ($rm.replicas | default 3) -}}
 {{- $ing := $rm.ingress | default (dict) -}}
-{{- $tls := dict "source" ($ing.tlsSource | default "secret") -}}
+{{- $tls := dict "source" ($ing.tlsSource | default "rancher") -}}
 {{- if $ing.tlsSecretName }}
 {{- $_ := set $tls "secretName" $ing.tlsSecretName -}}
 {{- end }}

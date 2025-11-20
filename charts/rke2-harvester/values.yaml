@@ -118,7 +118,7 @@ rancherManager:
     loadBalancerIP: ""
     annotations: {}
   ingress:
-    tlsSource: secret            # secret/manual/private-ca, letsEncrypt, or rancher
+    tlsSource: rancher           # rancher (default self-signed), letsEncrypt, or secret/private-ca
     tlsSecretName: ""          # Required when tlsSource=secret
     tlsSecret:                 # Optional inline TLS secret material (PEM); requires tlsSource=secret
       create: false
