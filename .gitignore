@@ -10,3 +10,4 @@
 /custom_values.yaml
 *rke2.kubeconfig
 rke2.kubeconfig
+/tmp/*
