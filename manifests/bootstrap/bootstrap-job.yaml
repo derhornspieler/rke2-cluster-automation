@@ -38,8 +38,17 @@ spec:
                 sleep 5
               done
 
+              echo "Waiting for cloud-init to finish on ${CP_IP}..."
+              ssh -i /ssh/id_ed25519 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+                rocky@${CP_IP} 'sudo cloud-init status --wait'
+              ssh -i /ssh/id_ed25519 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+                rocky@${CP_IP} 'sudo grep -E "Cloud-init[: ]+v.*finished" /var/log/cloud-init-output.log'
+
               ssh -i /ssh/id_ed25519 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
                 rocky@${CP_IP} 'sudo cat /etc/rancher/rke2/rke2.yaml' > /tmp/kubeconfig
+
+              # Replace the loopback server endpoint with the control-plane IP so the kubeconfig works off-host.
+              sed -i "s#server: https://127\\.0\\.0\\.1:6443#server: https://${CP_IP}:6443#" /tmp/kubeconfig
 
               kubectl create secret generic rke2-kubeconfig \
                 --from-file=kubeconfig=/tmp/kubeconfig \
