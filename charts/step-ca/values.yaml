@@ -1,0 +1,52 @@
+vm:
+  name: step-ca
+  namespace: default
+  image:
+    namespace: harvester-public
+    name: rocky-9-cloudimg
+  cpu: 2
+  memory: 4Gi
+  disk:
+    size: 20Gi
+    storageClassName: harvester-longhorn
+  network:
+    name: vlan2003
+    # Optional: Configure a static IP for the VM.
+    # If disabled, the VM will use DHCP.
+    staticIP:
+      enabled: false
+      # IP address with CIDR suffix (e.g., "192.168.1.123/24")
+      ip: ""
+      # Gateway IP address (e.g., "192.168.1.1")
+      gateway: ""
+      # List of DNS server IP addresses
+      dns:
+        - "8.8.8.8"
+        - "8.8.4.4"
+
+ssh:
+  user: rocky
+  publicKey: ""
+
+stepCa:
+  name: "Aegis Group Internal CA"
+  address: ":9000"
+  dns: "ca.aegisgroup.ch"
+  provisioner:
+    name: admin
+    password: "password"
+  password: "password"
+
+versions:
+  stepCli: "0.26.1"
+  stepCa: "0.26.1"
+
+service:
+  type: LoadBalancer
+  port: 9000
+
+ingress:
+  enabled: true
+  hostname: ca.aegisgroup.ch
+  tls: true
+  secretName: ca-tls

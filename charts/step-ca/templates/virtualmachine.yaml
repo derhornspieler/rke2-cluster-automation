@@ -1,0 +1,61 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Values.vm.namespace }}
+  annotations:
+    harvesterhci.io/vmName: {{ .Values.vm.name }}
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        harvesterhci.io/creator: harvester
+        harvesterhci.io/vmName: {{ .Values.vm.name }}
+    spec:
+      hostname: {{ .Values.vm.name }}
+      domain:
+        cpu:
+          cores: {{ .Values.vm.cpu }}
+        memory:
+          guest: {{ .Values.vm.memory }}
+        devices:
+          disks:
+            - name: rootdisk
+              bootOrder: 1
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              bootOrder: 2
+              disk:
+                bus: virtio
+      networks:
+        - name: default
+          multus:
+            networkName: {{ .Values.vm.network.name }}
+      volumes:
+        - name: rootdisk
+          persistentVolumeClaim:
+            claimName: {{ .Values.vm.name }}-root-disk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: {{ .Release.Name }}-cloud-init
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.vm.name }}-root-disk
+  namespace: {{ .Values.vm.namespace }}
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ .Values.vm.disk.size }}
+  storageClassName: {{ .Values.vm.disk.storageClassName }}
+  volumeName: ""
+  dataSource:
+    name: {{ .Values.vm.image.name }}
+    kind: VirtualMachineImage
+    apiGroup: harvesterhci.io
