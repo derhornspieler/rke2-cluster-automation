@@ -71,7 +71,8 @@ load_desired_shape() {
     DESIRED_SHAPE_JSON='{}'
     return
   fi
-  DESIRED_SHAPE_JSON="$(python3 - "$file" <<'PY' 2>/dev/null || true)"
+  DESIRED_SHAPE_JSON="$(
+    python3 - "$file" <<'PY' 2>/dev/null
 import json, re, sys
 from pathlib import Path
 try:
@@ -117,7 +118,7 @@ out = {
 }
 print(json.dumps(out))
 PY
-)
+  )"
 }
 
 # Load current cluster shape from the installed release (if present).

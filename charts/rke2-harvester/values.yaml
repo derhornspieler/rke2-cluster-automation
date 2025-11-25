@@ -9,6 +9,20 @@ replicaCounts:
   controlPlane: 3          # number of RKE2 control‑plane VMs
   worker: 0            # number of RKE2 worker VMs
 
+resources:
+  controlPlane:
+    cpuCores: 2                 # initial CPU sockets/cores
+    maxCpuSockets: 2            # optional ceiling for CPU hotplug (defaults to cpuCores)
+    memoryMi: 16386             # initial guest memory in MiB
+    maxMemoryMi: 16386          # optional ceiling for memory hotplug (defaults to memoryMi)
+    enableHotplug: false        # add harvesterhci.io/enableCPUAndMemoryHotplug
+  worker:
+    cpuCores: 2
+    maxCpuSockets: 2
+    memoryMi: 16386
+    maxMemoryMi: 16386
+    enableHotplug: false
+
 image:
   namespace: harvester-public        # Namespace that holds the VirtualMachineImage
   name: rocky-9-cloudimg             # Must exist in Harvester’s image catalog
@@ -75,20 +89,6 @@ kubeVip:
 tlsSANs:
   - internal-vip.local
 
-resources:
-  controlPlane:
-    cpuCores: 2                 # initial CPU sockets/cores
-    maxCpuSockets: 2            # optional ceiling for CPU hotplug (defaults to cpuCores)
-    memoryMi: 16386             # initial guest memory in MiB
-    maxMemoryMi: 16386          # optional ceiling for memory hotplug (defaults to memoryMi)
-    enableHotplug: false        # add harvesterhci.io/enableCPUAndMemoryHotplug
-  worker:
-    cpuCores: 2
-    maxCpuSockets: 2
-    memoryMi: 16386
-    maxMemoryMi: 16386
-    enableHotplug: false
-
 ssh:
   user: rocky                     # user that cloud‑init will create
   publicKey: "ssh-ed25519 "  # fill with your SSH public key (optional)
@@ -136,7 +136,11 @@ metallb:
   valuesContent: ""
   values: {}
   addressPools: []              # e.g. [{ name: rancher, protocol: layer2, autoAssign: false, addresses: ["192.168.10.6-192.168.10.9"] }]
-
+    # - name: rancher-vip
+    #   protocol: layer2
+    #   autoAssign: false
+    #   addresses:
+    #     - 172.16.3.6-172.16.3.6   # dedicated IP for Rancher
 certManager:
   enabled: false
   chartRepo: https://charts.jetstack.io
@@ -166,6 +170,26 @@ certManager:
 
 cloudProvider:
   cloudConfig: ""              # Inline kubeconfig for Harvester CCM (optional)
+  # cloudConfig: |
+    # ########## cloud config ############
+    # apiVersion: v1
+    # clusters:
+    # - cluster:
+    #     insecure-skip-tls-verify: true
+    #     server: https://172.16.2.2/k8s/clusters/local
+    #   name: local
+    # contexts:
+    # - context:
+    #     cluster: local
+    #     namespace: rke2
+    #     user: rke2-mgmt-cloud-provider-rke2-local
+    #   name: rke2-mgmt-cloud-provider-rke2-local
+    # current-context: rke2-mgmt-cloud-provider-rke2-local
+    # kind: Config
+    # users:
+    # - name: rke2-mgmt-cloud-provider-rke2-local
+    #   user:
+    #     token: <token>
   configPath: /var/lib/rancher/rke2/etc/config-files/cloud-provider-config
 
 vmDeployment:
