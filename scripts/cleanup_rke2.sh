@@ -33,7 +33,7 @@ Options:
 
 Environment variables:
   HELM_RELEASE        Helm release to uninstall (default: rke2).
-  HARVESTER_NAMESPACE Guest-cluster namespace (default: rke2).
+  HARVESTER_NAMESPACE Guest-cluster namespace (default: rke2). Set if you deployed to a non-default namespace.
   GUEST_KUBECONFIG    Path to guest cluster kubeconfig for cordon/drain (default: ./rke2.kubeconfig).
   WORKER_DRAIN_TIMEOUT Timeout passed to kubectl drain for worker nodes (default: 5m).
 EOF
