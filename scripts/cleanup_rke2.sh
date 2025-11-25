@@ -4,8 +4,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE="${HELM_RELEASE:-rke2}"
 NAMESPACE="${HARVESTER_NAMESPACE:-rke2}"
-DELETE_IMAGES=false
-DELETE_NETWORKS=false
+GUEST_KUBECONFIG="${GUEST_KUBECONFIG:-${REPO_ROOT}/rke2.kubeconfig}"
+DELETE_IMAGES=true
+DELETE_NETWORKS=true
+WORKER_DRAIN_TIMEOUT="${WORKER_DRAIN_TIMEOUT:-5m}"
+VM_NAME_PREFIX="${RELEASE}"
+CONTROL_PLANE_COUNT=0
+WORKER_COUNT=0
 
 IMAGE_MANIFESTS=(
   "${REPO_ROOT}/manifests/image/ubuntu.yaml"
@@ -29,6 +34,8 @@ Options:
 Environment variables:
   HELM_RELEASE        Helm release to uninstall (default: rke2).
   HARVESTER_NAMESPACE Guest-cluster namespace (default: rke2).
+  GUEST_KUBECONFIG    Path to guest cluster kubeconfig for cordon/drain (default: ./rke2.kubeconfig).
+  WORKER_DRAIN_TIMEOUT Timeout passed to kubectl drain for worker nodes (default: 5m).
 EOF
 }
 
@@ -66,10 +73,66 @@ delete_manifest_list() {
   done
 }
 
+guest_kubectl() {
+  if [[ ! -f "${GUEST_KUBECONFIG}" ]]; then
+    log "Guest kubeconfig ${GUEST_KUBECONFIG} not found; skipping guest cluster command: $*"
+    return 1
+  fi
+  KUBECONFIG="${GUEST_KUBECONFIG}" kubectl "$@"
+}
+
+load_release_shape() {
+  local values_json
+  if ! values_json="$(helm -n "${NAMESPACE}" get values "${RELEASE}" -o json 2>/dev/null)"; then
+    log "Unable to read Helm values for ${RELEASE}; falling back to defaults."
+    return
+  fi
+  local prefix cp wk
+  prefix="$(echo "${values_json}" | jq -r '.vmNamePrefix // empty' 2>/dev/null || true)"
+  cp="$(echo "${values_json}" | jq -r '.replicaCounts.controlPlane // 0' 2>/dev/null || true)"
+  wk="$(echo "${values_json}" | jq -r '.replicaCounts.worker // 0' 2>/dev/null || true)"
+  [[ -n "${prefix}" && "${prefix}" != "null" ]] && VM_NAME_PREFIX="${prefix}"
+  [[ -n "${cp}" && "${cp}" != "null" ]] && CONTROL_PLANE_COUNT="${cp}"
+  [[ -n "${wk}" && "${wk}" != "null" ]] && WORKER_COUNT="${wk}"
+  log "Derived cluster shape: prefix=${VM_NAME_PREFIX}, controlPlanes=${CONTROL_PLANE_COUNT}, workers=${WORKER_COUNT}."
+}
+
+cordon_drain_delete_workers() {
+  if [[ "${WORKER_COUNT}" -le 0 ]]; then
+    log "No worker nodes to cordon/drain based on Helm values."
+    return
+  fi
+  if [[ ! -f "${GUEST_KUBECONFIG}" ]]; then
+    log "Guest kubeconfig ${GUEST_KUBECONFIG} missing; skipping worker cordon/drain/delete."
+    return
+  fi
+  log "Cordon/drain/delete for ${WORKER_COUNT} worker nodes via ${GUEST_KUBECONFIG}."
+  local i node
+  for ((i=1; i<=WORKER_COUNT; i++)); do
+    node="${VM_NAME_PREFIX}-wk-${i}"
+    if ! guest_kubectl get node "${node}" >/dev/null 2>&1; then
+      log "Worker node ${node} not found in guest cluster; skipping."
+      continue
+    fi
+    guest_kubectl cordon "${node}" >/dev/null 2>&1 || log "Cordon failed for ${node}; continuing."
+    guest_kubectl drain "${node}" --ignore-daemonsets --delete-emptydir-data --force --grace-period=30 --timeout="${WORKER_DRAIN_TIMEOUT}" >/dev/null 2>&1 || log "Drain failed for ${node}; continuing to delete node."
+    guest_kubectl delete node "${node}" --ignore-not-found >/dev/null 2>&1 || true
+  done
+}
+
+delete_worker_pvcs() {
+  log "Deleting all PVCs in namespace ${NAMESPACE} (full cleanup)."
+  kubectl -n "${NAMESPACE}" delete pvc --all --ignore-not-found >/dev/null 2>&1 || true
+}
+
 require_bin helm
 require_bin kubectl
+require_bin jq
 
 log "Starting cleanup for release ${RELEASE} in namespace ${NAMESPACE}."
+
+load_release_shape
+cordon_drain_delete_workers
 
 if helm -n "${NAMESPACE}" status "${RELEASE}" >/dev/null 2>&1; then
   log "Uninstalling Helm release ${RELEASE}."
@@ -77,6 +140,8 @@ if helm -n "${NAMESPACE}" status "${RELEASE}" >/dev/null 2>&1; then
 else
   log "Helm release ${RELEASE} not found; skipping uninstall."
 fi
+
+delete_worker_pvcs
 
 log "Deleting bootstrap job artifacts (if present)."
 kubectl -n "${NAMESPACE}" delete job rke2-bootstrap --ignore-not-found >/dev/null 2>&1 || true

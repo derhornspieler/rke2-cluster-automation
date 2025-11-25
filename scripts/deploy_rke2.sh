@@ -13,6 +13,9 @@ SKIP_BOOTSTRAP=false
 TMP_DIR="${REPO_ROOT}/tmp"
 HELM_EXTRA_VALUES=()
 BOOTSTRAP_SSH_KEY="${BOOTSTRAP_SSH_KEY:-${TMP_DIR}/bootstrap_id_ed25519}"
+GUEST_DRAIN_TIMEOUT="${GUEST_DRAIN_TIMEOUT:-5m}"
+DESIRED_SHAPE_JSON=""
+CURRENT_SHAPE_JSON=""
 
 IMAGE_MANIFESTS=(
   "${REPO_ROOT}/manifests/image/ubuntu.yaml"
@@ -36,6 +39,7 @@ Environment variables:
   RKE2_KUBECONFIG     Where to write the extracted kubeconfig (default: ./rke2.kubeconfig).
   API_ENDPOINT        Override API server endpoint for the exported kubeconfig (default: kubeVip.address from Helm values).
   WAIT_SECONDS        Timeout (seconds) for VM readiness and bootstrap job (default: 1800).
+  GUEST_DRAIN_TIMEOUT Timeout passed to kubectl drain when downsizing workers (default: 5m).
 EOF
 }
 
@@ -57,6 +61,121 @@ log() {
   local timestamp
   timestamp="$(date +"%Y-%m-%dT%H:%M:%S%z")"
   printf '[%s] %s\n' "${timestamp}" "$*"
+}
+
+# Extract controlPlane/worker counts and vmNamePrefix from values file (best effort).
+load_desired_shape() {
+  local file="$1"
+  if [[ ! -f "${file}" ]]; then
+    log "Values file ${file} not found; skipping desired shape parsing."
+    DESIRED_SHAPE_JSON='{}'
+    return
+  fi
+  DESIRED_SHAPE_JSON="$(python3 - "$file" <<'PY' 2>/dev/null || true)"
+import json, re, sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print("{}")
+    sys.exit(0)
+text = path.read_text()
+
+def regex_find(pattern):
+    m = re.search(pattern, text, re.MULTILINE)
+    return m.group(1) if m else None
+
+if yaml is None:
+    cp = regex_find(r"controlPlane:\s*([0-9]+)")
+    wk = regex_find(r"worker:\s*([0-9]+)")
+    prefix = regex_find(r"vmNamePrefix:\s*([A-Za-z0-9._:-]+)")
+    out = {
+        "controlPlane": int(cp) if cp else None,
+        "worker": int(wk) if wk else None,
+        "vmNamePrefix": prefix,
+    }
+    print(json.dumps(out))
+    sys.exit(0)
+
+data = yaml.safe_load(text) or {}
+def deep_get(d, path):
+    cur = d
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+out = {
+    "controlPlane": deep_get(data, ["replicaCounts", "controlPlane"]),
+    "worker": deep_get(data, ["replicaCounts", "worker"]),
+    "vmNamePrefix": data.get("vmNamePrefix"),
+}
+print(json.dumps(out))
+PY
+)
+}
+
+# Load current cluster shape from the installed release (if present).
+load_current_shape() {
+  if ! CURRENT_SHAPE_JSON="$(helm -n "${NAMESPACE}" get values "${RELEASE}" -o json 2>/dev/null)"; then
+    CURRENT_SHAPE_JSON='{}'
+  fi
+}
+
+shape_value() {
+  local json="$1" path="$2"
+  jq -r "${path} // empty" <<<"${json}" 2>/dev/null || true
+}
+
+pre_drain_workers_if_shrinking() {
+  local current_workers desired_workers prefix node
+  current_workers="$(shape_value "${CURRENT_SHAPE_JSON}" '.replicaCounts.worker')"
+  desired_workers="$(shape_value "${DESIRED_SHAPE_JSON}" '.worker')"
+  prefix="$(shape_value "${CURRENT_SHAPE_JSON}" '.vmNamePrefix')"
+  [[ -z "${prefix}" || "${prefix}" == "null" ]] && prefix="${RELEASE}"
+  if [[ -z "${current_workers}" || -z "${desired_workers}" ]]; then
+    log "Unable to determine worker delta (current=${current_workers:-unknown}, desired=${desired_workers:-unknown}); skipping pre-drain."
+    return
+  fi
+  if (( desired_workers >= current_workers )); then
+    log "Worker count not decreasing (current=${current_workers}, desired=${desired_workers}); no pre-drain needed."
+    return
+  fi
+  if [[ ! -f "${RKE2_KUBECONFIG}" ]]; then
+    log "Guest kubeconfig ${RKE2_KUBECONFIG} missing; cannot cordon/drain workers before resize."
+    return
+  fi
+  log "Worker count decreasing from ${current_workers} to ${desired_workers}; cordon/drain/delete nodes ${prefix}-wk-<n> above desired."
+  local i
+  for ((i = desired_workers + 1; i <= current_workers; i++)); do
+    node="${prefix}-wk-${i}"
+    if ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl get node "${node}" >/dev/null 2>&1; then
+      log "Node ${node} not found; skipping."
+      continue
+    fi
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl cordon "${node}" >/dev/null 2>&1 || log "Cordon failed for ${node}; continuing."
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl drain "${node}" --ignore-daemonsets --delete-emptydir-data --force --grace-period=30 --timeout="${GUEST_DRAIN_TIMEOUT}" >/dev/null 2>&1 || log "Drain failed for ${node}; continuing to delete node."
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl delete node "${node}" --ignore-not-found >/dev/null 2>&1 || true
+  done
+}
+
+# Enforce control-plane >=3 preflight to avoid failed upgrades later.
+precheck_control_plane_minimum() {
+  local desired_cp
+  desired_cp="$(shape_value "${DESIRED_SHAPE_JSON}" '.controlPlane')"
+  if [[ -z "${desired_cp}" ]]; then
+    log "Desired control-plane count unknown (could not parse values); chart will enforce >=3."
+    return
+  fi
+  if (( desired_cp < 3 )); then
+    log "ERROR: control-plane count ${desired_cp} < 3 is not supported; aborting before Helm upgrade."
+    exit 1
+  fi
 }
 
 # Return the desired API endpoint for the guest cluster. Preference order:
@@ -380,6 +499,11 @@ run_bootstrap_job() {
 require_bin helm
 require_bin kubectl
 require_bin jq
+
+load_desired_shape "${VALUES_FILE}"
+load_current_shape
+precheck_control_plane_minimum
+pre_drain_workers_if_shrinking
 
 run_prereqs
 deploy_chart

@@ -45,11 +45,23 @@
 {{- $wkMemLimit := ternary $wkMemMax $wkMem $wkHotplug -}}
 {{- $cpCount := .Values.replicaCounts.controlPlane | int -}}
 {{- $wkCount := .Values.replicaCounts.worker | int -}}
+{{- $commonPvcLabels := dict "app.kubernetes.io/name" $namePrefix "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" "Helm" -}}
+{{- $cpPvcLabels := deepCopy $commonPvcLabels -}}
+{{- $_ := set $cpPvcLabels "app.kubernetes.io/component" "controlplane" -}}
+{{- $_ := set $cpPvcLabels "harvesterhci.io/rke2-role" "controlplane" -}}
+{{- $_ := set $cpPvcLabels "rke2.harvester.io/retain" "true" -}}
+{{- $wkPvcLabels := deepCopy $commonPvcLabels -}}
+{{- $_ := set $wkPvcLabels "app.kubernetes.io/component" "worker" -}}
+{{- $_ := set $wkPvcLabels "harvesterhci.io/rke2-role" "worker" -}}
+{{- $_ := set $wkPvcLabels "rke2.harvester.io/retain" "false" -}}
 {{- $cmName := printf "%s-vm-manifests" (include "rke2-harvester.fullname" .) -}}
 {{- $dhcpCfg := .Values.networks.vm.dhcp | default (dict) -}}
 {{- $cpDhcp := $dhcpCfg.controlPlane | default false -}}
 {{- $wkDhcp := $dhcpCfg.worker | default false -}}
 {{- $entries := dict -}}
+{{- if lt $cpCount 3 }}
+{{- fail "replicaCounts.controlPlane must be at least 3 to maintain quorum" -}}
+{{- end }}
 {{- range $i := until $cpCount }}
 {{- $vmOrdinal := add $i 1 -}}
 {{- $vmName := printf "%s-cp-%d" $namePrefix $vmOrdinal -}}
@@ -96,6 +108,7 @@
   "rancherInterface" $rancherInterface
   "rancherRoutes" $rancherRoutes
   "forceDhcp" $forceDhcp
+  "pvcLabels" $cpPvcLabels
 ) | b64enc -}}
 {{- $_ := set $entries (printf "%s.yaml" $vmName) $data -}}
 {{- end }}
@@ -145,6 +158,7 @@
   "rancherInterface" $rancherInterface
   "rancherRoutes" $rancherRoutes
   "forceDhcp" $forceDhcp
+  "pvcLabels" $wkPvcLabels
 ) | b64enc -}}
 {{- $_ := set $entries (printf "%s.yaml" $vmName) $data -}}
 {{- end }}

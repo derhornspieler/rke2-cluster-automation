@@ -4,6 +4,7 @@
 {{- $templatesEnabled = $ht.enabled -}}
 {{- end }}
 {{- if $templatesEnabled }}
+{{- $namePrefix := default .Release.Name .Values.vmNamePrefix -}}
 {{- $fullname := include "rke2-harvester.fullname" . -}}
 {{- $cloudConfig := printf "%s-cloud-config" $fullname -}}
 {{- $namespace := .Values.namespaceOverride | default .Release.Namespace -}}
@@ -38,6 +39,12 @@
 {{- if or (ne $role.key "worker") (gt $wkCount 0) }}
 {{- $templateName := printf "%s-%s-template" $fullname $role.key | trunc 63 | trimSuffix "-" -}}
 {{- $versionName := printf "%s-%s-version-r%d" $fullname $role.key $releaseRevision | trunc 63 | trimSuffix "-" -}}
+{{- $pvcLabels := dict "app.kubernetes.io/name" $namePrefix "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" "Helm" "app.kubernetes.io/component" $role.key "harvesterhci.io/rke2-role" $role.key -}}
+{{- if eq $role.key "worker" }}
+{{- $_ := set $pvcLabels "rke2.harvester.io/retain" "false" -}}
+{{- else }}
+{{- $_ := set $pvcLabels "rke2.harvester.io/retain" "true" -}}
+{{- end }}
 ---
 apiVersion: harvesterhci.io/v1beta1
 kind: VirtualMachineTemplate
@@ -58,9 +65,9 @@ spec:
   templateId: {{ printf "%s/%s" $namespace $templateName }}
   vm:
     metadata:
-      annotations:
-        harvesterhci.io/volumeClaimTemplates: |-
-{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" "pvc-rootdisk" "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $storageSize) | indent 10 }}
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: |-
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" "pvc-rootdisk" "imageID" $imageID "storageClass" $storageClass "accessMode" $accessMode "volumeMode" $volumeMode "storageSize" $storageSize "labels" $pvcLabels) | indent 10 }}
 {{- if $role.hotplug }}
         harvesterhci.io/enableCPUAndMemoryHotplug: "true"
 {{- end }}

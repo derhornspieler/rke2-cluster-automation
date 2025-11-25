@@ -11,7 +11,11 @@
 {{- $volumeMode := .volumeMode | default "Block" -}}
 {{- $storageSize := .storageSize | default "30Gi" -}}
 {{- $annotations := dict "harvesterhci.io/imageId" .imageID -}}
+{{- $labels := .labels | default (dict) -}}
 {{- $metadata := dict "name" .pvcName "annotations" $annotations -}}
+{{- if gt (len $labels) 0 }}
+{{- $_ := set $metadata "labels" $labels -}}
+{{- end }}
 {{- $resources := dict "requests" (dict "storage" $storageSize) -}}
 {{- $spec := dict "accessModes" (list $accessMode) "resources" $resources "volumeMode" $volumeMode -}}
 {{- if .storageClass }}
@@ -118,6 +122,7 @@ ethernets:
 {{- if and (not $macAddr) $vm.forceDhcp }}
 {{- $macAddr = include "rke2-harvester.generatedMac" (dict "vmName" $vm.vmName "namespace" $vm.namespace) -}}
 {{- end }}
+{{- $pvcLabels := $vm.pvcLabels | default (dict) -}}
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -129,7 +134,7 @@ metadata:
     harvesterhci.io/vmName: {{ $vm.vmName }}
   annotations:
     harvesterhci.io/volumeClaimTemplates: |-
-{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $vm.pvcName "imageID" $vm.imageID "storageClass" $vm.storageClass "accessMode" $vm.accessMode "volumeMode" $vm.volumeMode "storageSize" $vm.storageSize) | indent 6 }}
+{{ include "rke2-harvester.volumeClaimTemplates" (dict "pvcName" $vm.pvcName "imageID" $vm.imageID "storageClass" $vm.storageClass "accessMode" $vm.accessMode "volumeMode" $vm.volumeMode "storageSize" $vm.storageSize "labels" $pvcLabels) | indent 6 }}
 {{- if $vm.enableHotplug }}
     harvesterhci.io/enableCPUAndMemoryHotplug: "true"
 {{- end }}
