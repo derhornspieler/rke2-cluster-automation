@@ -11,6 +11,14 @@ RUN_ADDON=true
 SKIP_PREREQS=false
 SKIP_BOOTSTRAP=false
 TMP_DIR="${REPO_ROOT}/tmp"
+HARVESTER_CHART_REPO="${HARVESTER_CHART_REPO:-https://charts.harvesterhci.io}"
+HARVESTER_CSI_RELEASE="${HARVESTER_CSI_RELEASE:-harvester-csi-driver}"
+HARVESTER_CSI_CHART="${HARVESTER_CSI_CHART:-harvester/harvester-csi-driver}"
+HARVESTER_CSI_CHART_VERSION="${HARVESTER_CSI_CHART_VERSION:-}"
+HARVESTER_CSI_NAMESPACE="${HARVESTER_CSI_NAMESPACE:-kube-system}"
+HARVESTER_CSI_SECRET_NAME="${HARVESTER_CSI_SECRET_NAME:-harvester-cloud-config}"
+CSI_CLOUD_CONFIG_FILE="${CSI_CLOUD_CONFIG_FILE:-}"
+ADDON_CLOUD_CONFIG=""
 HELM_EXTRA_VALUES=()
 BOOTSTRAP_SSH_KEY="${BOOTSTRAP_SSH_KEY:-${TMP_DIR}/bootstrap_id_ed25519}"
 GUEST_DRAIN_TIMEOUT="${GUEST_DRAIN_TIMEOUT:-5m}"
@@ -29,7 +37,7 @@ Usage: scripts/deploy_rke2.sh [options]
 Options:
   --skip-prereqs     Skip Harvester prerequisite objects (namespace, images, SA/RBAC, networks).
   --skip-addon       Skip running generate_addon.sh for the Harvester CCM.
-  --skip-bootstrap   Skip the kubeconfig bootstrap job/secret retrieval.
+  --skip-bootstrap   Skip the kubeconfig bootstrap job/secret retrieval and guest API wait.
   -h, --help         Show this help and exit.
 
 Environment variables:
@@ -40,6 +48,9 @@ Environment variables:
   API_ENDPOINT        Override API server endpoint for the exported kubeconfig (default: kubeVip.address from Helm values).
   WAIT_SECONDS        Timeout (seconds) for VM readiness and bootstrap job (default: 1800).
   GUEST_DRAIN_TIMEOUT Timeout passed to kubectl drain when downsizing workers (default: 5m).
+  CSI_CLOUD_CONFIG_FILE Override path to Harvester cloud-config for CSI secret (defaults to generated addon config).
+  HARVESTER_CSI_CHART  Helm chart reference for Harvester CSI (default: harvester/harvester-csi-driver).
+  HARVESTER_CSI_CHART_VERSION Optional chart version for CSI install.
 EOF
 }
 
@@ -314,6 +325,77 @@ wait_for_guest_api() {
   done
 }
 
+validate_guest_workers() {
+  [[ ! -f "${RKE2_KUBECONFIG}" ]] && { log "Guest kubeconfig ${RKE2_KUBECONFIG} not found; skipping worker validation."; return; }
+
+  local desired_workers prefix
+  desired_workers="$(shape_value "${DESIRED_SHAPE_JSON}" '.worker')"
+  prefix="$(shape_value "${DESIRED_SHAPE_JSON}" '.vmNamePrefix')"
+  [[ -z "${prefix}" || "${prefix}" == "null" ]] && prefix="${RELEASE}"
+
+  if [[ -z "${desired_workers}" || "${desired_workers}" == "null" ]]; then
+    log "Desired worker count unknown; skipping worker validation."
+    return
+  fi
+
+  local nodes_json
+  if ! nodes_json=$(KUBECONFIG="${RKE2_KUBECONFIG}" kubectl --request-timeout=15s get nodes -o json 2>/dev/null); then
+    log "Unable to query guest nodes with kubeconfig ${RKE2_KUBECONFIG}; skipping worker validation."
+    return
+  fi
+
+  local summary actual ready names
+  summary=$(jq -r --arg prefix "${prefix}-wk-" '
+    [ .items[]? | select(.metadata.name | startswith($prefix)) ] as $nodes
+    | [
+        ($nodes | length),
+        ($nodes | map(select(any(.status.conditions[]?; .type=="Ready" and .status=="True"))) | length),
+        ($nodes | map(.metadata.name) | sort | join(","))
+      ] | @tsv
+  ' <<<"${nodes_json}")
+  IFS=$'\t' read -r actual ready names <<<"${summary}"
+
+  if (( actual == desired_workers )); then
+    log "Worker validation: ${actual}/${desired_workers} nodes matching prefix ${prefix}-wk- present (Ready: ${ready})."
+  else
+    log "WARNING: Worker validation mismatch for prefix ${prefix}-wk- (expected ${desired_workers}, found ${actual}; Ready: ${ready}). Nodes: ${names:-<none>}."
+  fi
+}
+
+install_harvester_csi() {
+  $SKIP_BOOTSTRAP && { log "Skipping Harvester CSI install because bootstrap was skipped (guest kubeconfig not refreshed)."; return; }
+  [[ ! -f "${RKE2_KUBECONFIG}" ]] && { log "Guest kubeconfig ${RKE2_KUBECONFIG} not found; cannot install Harvester CSI."; return; }
+
+  local cfg="${CSI_CLOUD_CONFIG_FILE:-${ADDON_CLOUD_CONFIG:-}}"
+  if [[ -z "${cfg}" || ! -f "${cfg}" ]]; then
+    log "Harvester cloud-config not found (looked for ${cfg:-<unset>}); set CSI_CLOUD_CONFIG_FILE to a kubeconfig for the Harvester management cluster."
+    return
+  fi
+
+  log "Ensuring Harvester Helm repo is added."
+  helm repo add harvester "${HARVESTER_CHART_REPO}" >/dev/null 2>&1 || true
+  helm repo update >/dev/null 2>&1 || true
+
+  log "Ensuring CSI snapshot CRDs are present."
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
+    -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml \
+    -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml >/dev/null
+
+  log "Creating/Updating CSI cloud-config secret ${HARVESTER_CSI_SECRET_NAME} in namespace ${HARVESTER_CSI_NAMESPACE}."
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" create secret generic "${HARVESTER_CSI_SECRET_NAME}" \
+    --from-file=cloud-provider-config="${cfg}" --dry-run=client -o yaml | \
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
+
+  log "Installing/Upgrading Harvester CSI chart ${HARVESTER_CSI_CHART} (release ${HARVESTER_CSI_RELEASE}) in ${HARVESTER_CSI_NAMESPACE}."
+  local args=(upgrade --install "${HARVESTER_CSI_RELEASE}" "${HARVESTER_CSI_CHART}"
+    --namespace "${HARVESTER_CSI_NAMESPACE}" --create-namespace
+    --set "cloudConfig.secretName=${HARVESTER_CSI_SECRET_NAME}")
+  if [[ -n "${HARVESTER_CSI_CHART_VERSION}" ]]; then
+    args+=(--version "${HARVESTER_CSI_CHART_VERSION}")
+  fi
+  KUBECONFIG="${RKE2_KUBECONFIG}" helm "${args[@]}"
+}
+
 wait_for_vm_images() {
   local images=("$@")
   ((${#images[@]} == 0)) && return
@@ -424,6 +506,7 @@ run_prereqs() {
       {print}
       /^[[:space:]]*server:/ {print "    insecure-skip-tls-verify: true"}
     ' "${addon_cfg}" > "${addon_cfg_insecure}"
+    ADDON_CLOUD_CONFIG="${addon_cfg_insecure}"
     local overlay="${TMP_DIR}/cloud-config.values.yaml"
     {
       echo "cloudProvider:"
@@ -510,6 +593,12 @@ run_prereqs
 deploy_chart
 wait_for_vms
 run_bootstrap_job
-wait_for_guest_api
+if $SKIP_BOOTSTRAP; then
+  log "Skipping guest API wait because bootstrap was skipped."
+else
+  wait_for_guest_api
+  install_harvester_csi
+fi
+validate_guest_workers
 
 log "Deployment workflow finished. Export KUBECONFIG=${RKE2_KUBECONFIG} to interact with the guest cluster."

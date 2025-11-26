@@ -7,17 +7,17 @@ namespaceOverride: ""
 # ------------------------------------------------------------------
 replicaCounts:
   controlPlane: 3          # number of RKE2 control‑plane VMs
-  worker: 0            # number of RKE2 worker VMs
+  worker: 1            # number of RKE2 worker VMs
 
 resources:
   controlPlane:
-    cpuCores: 2                 # initial CPU sockets/cores
+    cpuCores: 4                 # initial CPU sockets/cores
     maxCpuSockets: 2            # optional ceiling for CPU hotplug (defaults to cpuCores)
     memoryMi: 16386             # initial guest memory in MiB
     maxMemoryMi: 16386          # optional ceiling for memory hotplug (defaults to memoryMi)
     enableHotplug: false        # add harvesterhci.io/enableCPUAndMemoryHotplug
   worker:
-    cpuCores: 2
+    cpuCores: 4
     maxCpuSockets: 2
     memoryMi: 16386
     maxMemoryMi: 16386
@@ -29,6 +29,9 @@ image:
   pullPolicy: IfNotPresent
 
 vmNamePrefix: rke2                   # Prefix for generated VM names (defaults to Helm release name)
+
+controlPlane:
+  allowWorkloads: true               # If false, taint control planes with NoSchedule to keep user workloads off them
 
 storage:
   className: ""                     # leave empty to use Harvester's per-image storage class
@@ -112,7 +115,6 @@ rancherManager:
     extraEnv:
       - name: CATTLE_SERVER_URL
         value: https://rancher.yourdomain.com
-
   service:
     type: LoadBalancer
     loadBalancerIP: ""

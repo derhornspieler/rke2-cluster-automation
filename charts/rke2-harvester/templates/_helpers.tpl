@@ -594,6 +594,7 @@ write_files:
 {{- $caEnabled := and $cmEnabled $rancherEnabled ($ca.create | default false) $caSecret $rancherNamespace -}}
 {{- $tlsSecret := $rm.ingress.tlsSecret | default dict -}}
 {{- $tlsSecretEnabled := and $rancherEnabled ($tlsSecret.create | default false) $rancherNamespace ($rm.ingress.tlsSecretName | default "") ($tlsSecret.certificate | default "") ($tlsSecret.privateKey | default "") -}}
+{{- $cpAllowWorkloads := default true .Values.controlPlane.allowWorkloads -}}
 {{- if and $rancherEnabled $rancherNamespace }}
   - path: /var/lib/rancher/rke2/server/manifests/rancher-namespace.yaml
     owner: root:root
@@ -782,4 +783,51 @@ runcmd:
     EOF
     chmod +x /usr/local/bin/clear-harvester-taint.sh
     /usr/local/bin/clear-harvester-taint.sh &
+  - |
+    cat <<'EOF' >/usr/local/bin/manage-controlplane-taint.sh
+    #!/bin/bash
+    set -euo pipefail
+    HOSTNAME="$(hostname)"
+    case "${HOSTNAME}" in
+      *-cp-*) ;;
+      *) exit 0 ;;
+    esac
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    TARGET_TAINT="node-role.kubernetes.io/control-plane=:NoSchedule"
+    for i in {1..60}; do
+      if kubectl get nodes >/dev/null 2>&1; then
+{{- if $cpAllowWorkloads }}
+        kubectl taint nodes "$HOSTNAME" "${TARGET_TAINT}"- || true
+{{- else }}
+        kubectl taint nodes "$HOSTNAME" "${TARGET_TAINT}" --overwrite || true
+{{- end }}
+        exit 0
+      fi
+      sleep 5
+    done
+    exit 0
+    EOF
+    chmod +x /usr/local/bin/manage-controlplane-taint.sh
+    /usr/local/bin/manage-controlplane-taint.sh &
+  - |
+    cat <<'EOF' >/usr/local/bin/label-worker.sh
+    #!/bin/bash
+    set -euo pipefail
+    HOSTNAME="$(hostname)"
+    case "${HOSTNAME}" in
+      *-wk-*) ;;
+      *) exit 0 ;;
+    esac
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    for i in {1..60}; do
+      if kubectl get nodes >/dev/null 2>&1; then
+        kubectl label nodes "$HOSTNAME" worker=true role=worker --overwrite || true
+        exit 0
+      fi
+      sleep 5
+    done
+    exit 0
+    EOF
+    chmod +x /usr/local/bin/label-worker.sh
+    /usr/local/bin/label-worker.sh &
 {{- end -}}
