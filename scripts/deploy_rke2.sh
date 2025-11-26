@@ -17,7 +17,9 @@ HARVESTER_CSI_CHART="${HARVESTER_CSI_CHART:-harvester/harvester-csi-driver}"
 HARVESTER_CSI_CHART_VERSION="${HARVESTER_CSI_CHART_VERSION:-}"
 HARVESTER_CSI_NAMESPACE="${HARVESTER_CSI_NAMESPACE:-kube-system}"
 HARVESTER_CSI_SECRET_NAME="${HARVESTER_CSI_SECRET_NAME:-harvester-cloud-config}"
+HARVESTER_CSI_MANIFEST="${HARVESTER_CSI_MANIFEST:-${REPO_ROOT}/manifests/csi/harvester-csi-driver.yaml}"
 CSI_CLOUD_CONFIG_FILE="${CSI_CLOUD_CONFIG_FILE:-}"
+CSI_SMOKE_TEST="${CSI_SMOKE_TEST:-true}"
 ADDON_CLOUD_CONFIG=""
 HELM_EXTRA_VALUES=()
 BOOTSTRAP_SSH_KEY="${BOOTSTRAP_SSH_KEY:-${TMP_DIR}/bootstrap_id_ed25519}"
@@ -51,6 +53,8 @@ Environment variables:
   CSI_CLOUD_CONFIG_FILE Override path to Harvester cloud-config for CSI secret (defaults to generated addon config).
   HARVESTER_CSI_CHART  Helm chart reference for Harvester CSI (default: harvester/harvester-csi-driver).
   HARVESTER_CSI_CHART_VERSION Optional chart version for CSI install.
+  HARVESTER_CSI_MANIFEST Path to a local CSI manifest to apply instead of using the upstream chart (default: manifests/csi/harvester-csi-driver.yaml).
+  CSI_SMOKE_TEST      Set to false to skip the PVC/Pod CSI smoke test (default: true).
 EOF
 }
 
@@ -254,32 +258,22 @@ wait_for_cp_ssh() {
 
 wait_for_cloud_init() {
   ensure_bootstrap_ssh_key
-  local start last_log=0 cp_ip
-  start=$(date +%s)
+  local cp_ip status_out
   log "Waiting for cloud-init to finish on control-plane VM."
   while true; do
     cp_ip="$(get_control_plane_ip)"
-    if [[ -z "${cp_ip}" ]]; then
-      sleep 5
-      continue
-    fi
-    if ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-      rocky@"${cp_ip}" 'sudo cloud-init status --wait && sudo grep -E "Cloud-init[: ]+v.*finished" /var/log/cloud-init-output.log' >/dev/null 2>&1; then
-      log "cloud-init completed on ${cp_ip}."
-      break
-    fi
-    local now
-    now=$(date +%s)
-    if (( now - start > WAIT_SECONDS )); then
-      log "Timed out waiting for cloud-init to complete on ${cp_ip:-unknown}." >&2
-      exit 1
-    fi
-    if (( now - last_log >= 30 )); then
-      log "cloud-init not finished yet on ${cp_ip:-unknown}; retrying..."
-      last_log=${now}
-    fi
-    sleep 10
+    [[ -n "${cp_ip}" ]] && break
+    sleep 5
   done
+  status_out="$(ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+    rocky@"${cp_ip}" 'sudo cloud-init status --wait || true; sudo cloud-init status --long' 2>/dev/null || true)"
+  if grep -q "status: error" <<<"${status_out}"; then
+    log "cloud-init reported failure on ${cp_ip}; recent log output follows:" >&2
+    ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+      rocky@"${cp_ip}" 'sudo tail -n 100 /var/log/cloud-init-output.log' >&2 || true
+    exit 1
+  fi
+  log "cloud-init completed on ${cp_ip}."
 }
 
 # Rewrite the kubeconfig server endpoint to the provided host/IP (keeps the scheme/port).
@@ -372,10 +366,6 @@ install_harvester_csi() {
     return
   fi
 
-  log "Ensuring Harvester Helm repo is added."
-  helm repo add harvester "${HARVESTER_CHART_REPO}" >/dev/null 2>&1 || true
-  helm repo update >/dev/null 2>&1 || true
-
   log "Ensuring CSI snapshot CRDs are present."
   KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
     -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml \
@@ -386,6 +376,21 @@ install_harvester_csi() {
     --from-file=cloud-provider-config="${cfg}" --dry-run=client -o yaml | \
     KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
 
+  if [[ -n "${HARVESTER_CSI_MANIFEST}" && -f "${HARVESTER_CSI_MANIFEST}" ]]; then
+    if KUBECONFIG="${RKE2_KUBECONFIG}" helm -n "${HARVESTER_CSI_NAMESPACE}" status "${HARVESTER_CSI_RELEASE}" >/dev/null 2>&1; then
+      log "Uninstalling legacy Helm release ${HARVESTER_CSI_RELEASE} in favor of local manifest ${HARVESTER_CSI_MANIFEST}."
+      KUBECONFIG="${RKE2_KUBECONFIG}" helm -n "${HARVESTER_CSI_NAMESPACE}" uninstall "${HARVESTER_CSI_RELEASE}" >/dev/null 2>&1 || true
+    fi
+    log "Applying local Harvester CSI manifest ${HARVESTER_CSI_MANIFEST}."
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f "${HARVESTER_CSI_MANIFEST}"
+    return
+  fi
+
+  log "CSI manifest ${HARVESTER_CSI_MANIFEST:-<unset>} not found; falling back to Helm chart ${HARVESTER_CSI_CHART}."
+  log "Ensuring Harvester Helm repo is added."
+  helm repo add harvester "${HARVESTER_CHART_REPO}" >/dev/null 2>&1 || true
+  helm repo update >/dev/null 2>&1 || true
+
   log "Installing/Upgrading Harvester CSI chart ${HARVESTER_CSI_CHART} (release ${HARVESTER_CSI_RELEASE}) in ${HARVESTER_CSI_NAMESPACE}."
   local args=(upgrade --install "${HARVESTER_CSI_RELEASE}" "${HARVESTER_CSI_CHART}"
     --namespace "${HARVESTER_CSI_NAMESPACE}" --create-namespace
@@ -394,6 +399,68 @@ install_harvester_csi() {
     args+=(--version "${HARVESTER_CSI_CHART_VERSION}")
   fi
   KUBECONFIG="${RKE2_KUBECONFIG}" helm "${args[@]}"
+}
+
+smoke_test_csi() {
+  [[ "${CSI_SMOKE_TEST}" == "false" ]] && { log "Skipping CSI smoke test (CSI_SMOKE_TEST=${CSI_SMOKE_TEST})."; return; }
+  [[ ! -f "${RKE2_KUBECONFIG}" ]] && { log "Guest kubeconfig ${RKE2_KUBECONFIG} not found; skipping CSI smoke test."; return; }
+
+  local name="harvester-csi-smoke-$(date +%s)"
+  local pvc="${name}"
+  local pod="${name}"
+  log "Starting CSI smoke test with PVC/Pod ${name}."
+  cat <<EOF | KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: harvester
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+spec:
+  containers:
+    - name: busybox
+      image: busybox:1.36
+      command: ["/bin/sh","-c","echo smoke-ok > /data/hello && sleep 300"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${pvc}
+EOF
+
+  local rc=0
+  if ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Bound pvc/"${pvc}" --timeout=120s; then
+    log "CSI smoke test PVC did not bind."
+    rc=1
+  fi
+  if (( rc == 0 )) && ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Ready pod/"${pod}" --timeout=180s; then
+    log "CSI smoke test pod did not become Ready."
+    rc=1
+  fi
+  if (( rc == 0 )) && ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl exec "${pod}" -- cat /data/hello | grep -q "smoke-ok"; then
+    log "CSI smoke test content verification failed."
+    rc=1
+  fi
+
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl delete pod "${pod}" pvc "${pvc}" --ignore-not-found >/dev/null 2>&1 || true
+  if (( rc == 0 )); then
+    log "CSI smoke test succeeded."
+  else
+    log "CSI smoke test failed."
+    return 1
+  fi
 }
 
 wait_for_vm_images() {
@@ -576,6 +643,11 @@ run_bootstrap_job() {
   else
     log "No API endpoint override provided; kubeconfig server left unchanged."
   fi
+  # Normalize context name/current-context to \"rke2\" for easier merging/flattening.
+  if kubectl --kubeconfig="${RKE2_KUBECONFIG}" config get-contexts default >/dev/null 2>&1; then
+    kubectl --kubeconfig="${RKE2_KUBECONFIG}" config rename-context default rke2 >/dev/null 2>&1 || true
+  fi
+  kubectl --kubeconfig="${RKE2_KUBECONFIG}" config use-context rke2 >/dev/null 2>&1 || true
   log "Kubeconfig written to ${RKE2_KUBECONFIG}"
   kubectl delete -f "${REPO_ROOT}/manifests/bootstrap/bootstrap-job.yaml"
 }
@@ -598,6 +670,7 @@ if $SKIP_BOOTSTRAP; then
 else
   wait_for_guest_api
   install_harvester_csi
+  smoke_test_csi || true
 fi
 validate_guest_workers
 
