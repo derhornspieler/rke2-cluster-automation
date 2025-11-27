@@ -469,49 +469,84 @@ spec:
 {{- $defaultSA := printf "%s-kube-vip" (include "rke2-harvester.fullname" .) -}}
 {{- $serviceAccount := default $defaultSA $vip.serviceAccountName -}}
 {{- $cidr := $vip.cidr | default "" -}}
-apiVersion: v1
-kind: Pod
+{{- $interface := $vip.interface | default "eth0" -}}
+{{- $vipCidr := (printf "%v" ($cidr | default "")) -}}
+apiVersion: apps/v1
+kind: DaemonSet
 metadata:
   name: kube-vip
   namespace: {{ $namespace }}
   labels:
     app.kubernetes.io/name: kube-vip
 spec:
-  serviceAccountName: {{ $serviceAccount }}
-  automountServiceAccountToken: true
-  hostNetwork: true
-  priorityClassName: system-node-critical
-  tolerations:
-    - operator: Exists
-  containers:
-    - name: kube-vip
-      image: {{ $vip.image }}
-      imagePullPolicy: IfNotPresent
-      args:
-        - manager
-      env:
-        - name: vip_arp
-          value: "true"
-        - name: cp_enable
-          value: "true"
-        - name: svc_enable
-          value: "false"
-        - name: vip_interface
-          value: {{ $vip.interface }}
-        - name: vip_address
-          value: {{ $vip.address | quote }}
-        - name: vip_leaderelection
-          value: "true"
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-vip
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-vip
+    spec:
+      serviceAccountName: {{ $serviceAccount }}
+      automountServiceAccountToken: true
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: sysctl-promote-secondaries
+          image: busybox:1.36
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - >
+              sysctl -w net.ipv4.conf.all.promote_secondaries=1 net.ipv4.conf.{{ $interface }}.promote_secondaries=1
+              net.ipv4.conf.all.accept_local=1 net.ipv4.conf.{{ $interface }}.accept_local=1
+      containers:
+        - name: kube-vip
+          image: {{ $vip.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - manager
+          env:
+            - name: vip_arp
+              value: "true"
+            - name: cp_enable
+              value: "true"
+            - name: svc_enable
+              value: "false"
+            - name: lb_enable
+              value: "false"
+            - name: vip_interface
+              value: {{ $interface }}
+            - name: vip_address
+              value: {{ $vip.address | quote }}
+            - name: vip_leaderelection
+              value: "true"
+            - name: cp_namespace
+              value: kube-system
 {{- if $cidr }}
-        - name: vip_cidr
-          value: {{ printf "%v" $cidr | quote }}
+            - name: vip_cidr
+              value: {{ printf "%v" $cidr | quote }}
 {{- end }}
-      securityContext:
-        capabilities:
-          add:
-            - NET_ADMIN
-            - NET_RAW
-            - SYS_TIME
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_TIME
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - >
+                    ip addr add {{ $vip.address }}{{ if $vipCidr }}/{{ $vipCidr }}{{ end }} dev {{ $interface }} 2>/dev/null || true
 {{- end -}}
 
 {{- define "rke2-harvester.userData" -}}
@@ -548,6 +583,7 @@ write_files:
       cloud-provider-name: harvester
 {{- $kubeVip := .Values.kubeVip | default dict -}}
 {{- $hasVip := and ($kubeVip.enabled | default false) $kubeVip.address }}
+{{- $useDaemonSet := $kubeVip.useDaemonSet | default true -}}
 {{- $vipRBAC := and $hasVip ($kubeVip.rbac.create | default true) }}
 {{- if $hasVip }}
       server: https://{{ $kubeVip.address }}:9345
@@ -561,14 +597,14 @@ write_files:
         - {{ . }}
 {{- end }}
 {{- end }}
-{{- if $vipRBAC }}
+{{- if and $hasVip $vipRBAC }}
   - path: /var/lib/rancher/rke2/server/manifests/kube-vip-rbac.yaml
     owner: root:root
     permissions: "0644"
     content: |
 {{ include "rke2-harvester.kubeVipRBACManifest" . | indent 6 }}
 {{- end }}
-{{- if $hasVip }}
+{{- if and $hasVip $useDaemonSet }}
   - path: /var/lib/rancher/rke2/server/manifests/kube-vip.yaml
     owner: root:root
     permissions: "0644"

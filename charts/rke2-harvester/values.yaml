@@ -79,15 +79,32 @@ loadBalancer:
   network: ""
 
 kubeVip:
-  enabled: true
+  enabled: false
   namespace: kube-system
-  address: ""                        # Required when enabled
-  interface: eth0
-  cidr: ""                           # Optional CIDR prefix for vip_address (defaults to interface route)
-  image: ghcr.io/kube-vip/kube-vip:v0.8.9
+  useDaemonSet: true
+  vip_address: ""                    # VIP address
+  vip_interface: eth0                # Interface for the VIP
+  vip_cidr: ""                       # CIDR for the VIP (e.g. 172.16.3.1/24 or just 24)
+  imageRepository: ghcr.io/kube-vip/kube-vip
+  imageTag: v0.8.9
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+  ttl: 30
+  arp: true
+  leaderElection: true
+  cpEnabled: true
+  svc_enabled: false
+  lb_enabled: false
   serviceAccountName: kube-vip-static       # ServiceAccount used by the static pod
   rbac:
     create: true                     # Set false if you manage kube-vip RBAC yourself
+  securityContext:
+    capabilities:
+      add:
+        - NET_ADMIN
+        - NET_RAW
+        - SYS_TIME
+  hostNetwork: true                  # Set false if you manage kube-vip RBAC yourself
 
 tlsSANs:
   - internal-vip.local

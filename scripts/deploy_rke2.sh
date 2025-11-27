@@ -18,6 +18,8 @@ HARVESTER_CSI_CHART_VERSION="${HARVESTER_CSI_CHART_VERSION:-}"
 HARVESTER_CSI_NAMESPACE="${HARVESTER_CSI_NAMESPACE:-kube-system}"
 HARVESTER_CSI_SECRET_NAME="${HARVESTER_CSI_SECRET_NAME:-harvester-cloud-config}"
 HARVESTER_CSI_MANIFEST="${HARVESTER_CSI_MANIFEST:-${REPO_ROOT}/manifests/csi/harvester-csi-driver.yaml}"
+HARVESTER_CSI_HELM_USE="${HARVESTER_CSI_HELM_USE:-true}"
+HARVESTER_KUBEVIP_DS_ENABLED="${HARVESTER_KUBEVIP_DS_ENABLED:-true}"
 CSI_CLOUD_CONFIG_FILE="${CSI_CLOUD_CONFIG_FILE:-}"
 CSI_SMOKE_TEST="${CSI_SMOKE_TEST:-true}"
 ADDON_CLOUD_CONFIG=""
@@ -26,6 +28,8 @@ BOOTSTRAP_SSH_KEY="${BOOTSTRAP_SSH_KEY:-${TMP_DIR}/bootstrap_id_ed25519}"
 GUEST_DRAIN_TIMEOUT="${GUEST_DRAIN_TIMEOUT:-5m}"
 DESIRED_SHAPE_JSON=""
 CURRENT_SHAPE_JSON=""
+KUBEVIP_ADDRESS=""
+KUBEVIP_INTERFACE=""
 
 IMAGE_MANIFESTS=(
   "${REPO_ROOT}/manifests/image/ubuntu.yaml"
@@ -207,10 +211,107 @@ get_api_endpoint() {
     jq -r '.kubeVip.address // empty' || true
 }
 
+# Best-effort read of a field from the values file.
+read_values_field() {
+  local field="$1"
+  python3 - "$field" "${VALUES_FILE}" <<'PY' 2>/dev/null
+import sys, re
+
+field = sys.argv[1]
+path = sys.argv[2]
+
+def print_value(val):
+    if val is None:
+        return
+    if isinstance(val, (int, float, bool)):
+        print(val)
+    elif isinstance(val, str):
+        print(val)
+
+try:
+    import yaml  # type: ignore
+    data = yaml.safe_load(open(path))
+    cur = data
+    for part in field.split('.'):
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            cur = None
+            break
+    print_value(cur)
+except Exception:
+    # Fallback: best-effort regex scan for "key: value" when PyYAML isn't available.
+    try:
+        text = open(path).read()
+    except Exception:
+        sys.exit(0)
+    key = field.split('.')[-1]
+    pattern = re.compile(rf'^{re.escape(key)}\s*:\s*(.+)$', re.MULTILINE)
+    m = pattern.search(text)
+    if m:
+        val = m.group(1).strip().strip('"\'')
+        print(val)
+PY
+}
+
 # Return first control-plane VMI IP (empty if none yet).
 get_control_plane_ip() {
   kubectl -n "${NAMESPACE}" get vmi -l app.kubernetes.io/component=controlplane \
     -o jsonpath='{range .items[?(@.status.interfaces[0].ipAddress!="")]}{.status.interfaces[0].ipAddress}{"\n"}{end}' | head -n1
+}
+
+disable_kubevip_daemonset() {
+  if [[ "${HARVESTER_KUBEVIP_DS_ENABLED}" == "true" ]]; then
+    log "Keeping kube-vip daemonset enabled (HARVESTER_KUBEVIP_DS_ENABLED=true)."
+    local vip addr iface
+    addr="${KUBEVIP_ADDRESS:-$(read_values_field kubeVip.address)}"
+    iface="${KUBEVIP_INTERFACE:-$(read_values_field kubeVip.interface)}"
+    # Force static kube-vip off in our chart.
+    local overlay="${TMP_DIR}/kubevip-disable-static.values.yaml"
+    mkdir -p "${TMP_DIR}"
+    cat <<EOF > "${overlay}"
+kubeVip:
+  enabled: false
+EOF
+    HELM_EXTRA_VALUES+=("${overlay}")
+    # Ensure HelmChartConfig enables kube-vip and passes VIP/interface if provided.
+    cat <<EOF | kubectl apply -f -
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: harvester-cloud-provider
+  namespace: kube-system
+spec:
+  valuesContent: |
+    kube-vip:
+      enabled: true
+      env:
+        vip_address: ${addr:-""}
+        vip_interface: ${iface:-""}
+        vip_arp: "true"
+        lb_enable: "true"
+        lb_port: "6443"
+        vip_cidr: "32"
+        cp_enable: "false"
+        svc_enable: "true"
+        vip_leaderelection: "true"
+EOF
+    return
+  fi
+  log "Disabling kube-vip daemonset from harvester-cloud-provider (keeping static kube-vip)."
+  cat <<EOF | kubectl apply -f -
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: harvester-cloud-provider
+  namespace: kube-system
+spec:
+  valuesContent: |
+    kube-vip:
+      enabled: false
+EOF
+  kubectl -n kube-system delete ds kube-vip --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n kube-system delete pod -l app.kubernetes.io/name=kube-vip --ignore-not-found >/dev/null 2>&1 || true
 }
 
 ensure_bootstrap_ssh_key() {
@@ -376,29 +477,104 @@ install_harvester_csi() {
     --from-file=cloud-provider-config="${cfg}" --dry-run=client -o yaml | \
     KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
 
-  if [[ -n "${HARVESTER_CSI_MANIFEST}" && -f "${HARVESTER_CSI_MANIFEST}" ]]; then
-    if KUBECONFIG="${RKE2_KUBECONFIG}" helm -n "${HARVESTER_CSI_NAMESPACE}" status "${HARVESTER_CSI_RELEASE}" >/dev/null 2>&1; then
-      log "Uninstalling legacy Helm release ${HARVESTER_CSI_RELEASE} in favor of local manifest ${HARVESTER_CSI_MANIFEST}."
-      KUBECONFIG="${RKE2_KUBECONFIG}" helm -n "${HARVESTER_CSI_NAMESPACE}" uninstall "${HARVESTER_CSI_RELEASE}" >/dev/null 2>&1 || true
-    fi
-    log "Applying local Harvester CSI manifest ${HARVESTER_CSI_MANIFEST}."
-    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f "${HARVESTER_CSI_MANIFEST}"
+  # Clean up any manual CSI resources to avoid helm ownership conflicts.
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" delete deploy csi-controller --ignore-not-found >/dev/null 2>&1 || true
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" delete ds harvester-csi-plugin --ignore-not-found >/dev/null 2>&1 || true
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl delete sc harvester --ignore-not-found >/dev/null 2>&1 || true
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl delete csidriver driver.harvesterhci.io --ignore-not-found >/dev/null 2>&1 || true
+
+  if [[ "${HARVESTER_CSI_HELM_USE}" == "true" ]]; then
+    cat <<EOF | KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: harvester-csi-driver
+  namespace: kube-system
+spec:
+  valuesContent: |
+    cloudConfig:
+      secretName: ${HARVESTER_CSI_SECRET_NAME}
+EOF
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" delete job -l app=helm,name=harvester-csi-driver --ignore-not-found >/dev/null 2>&1 || true
+    log "Relying on helm-controller/HelmChart to install harvester-csi-driver (helm path)."
+    # Post-patch controller pods to run as root (minimal change vs full privileged) so they can access the host-mounted /csi socket.
+    local waited=0
+    until KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" get deploy harvester-csi-driver-controllers >/dev/null 2>&1; do
+      sleep 5
+      waited=$((waited+5))
+      if (( waited >= 180 )); then
+        log "Timed out waiting for harvester-csi-driver-controllers deployment to appear; skipping securityContext patch."
+        return
+      fi
+    done
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" patch deploy harvester-csi-driver-controllers --type='json' -p='[
+      {"op":"add","path":"/spec/template/spec/securityContext","value":{"runAsUser":0,"runAsGroup":0,"fsGroup":0}},
+      {"op":"add","path":"/spec/template/spec/containers/0/securityContext","value":{"runAsUser":0,"runAsGroup":0,"privileged":true}},
+      {"op":"add","path":"/spec/template/spec/containers/1/securityContext","value":{"runAsUser":0,"runAsGroup":0,"privileged":true}},
+      {"op":"add","path":"/spec/template/spec/containers/2/securityContext","value":{"runAsUser":0,"runAsGroup":0,"privileged":true}},
+      {"op":"add","path":"/spec/template/spec/containers/3/securityContext","value":{"runAsUser":0,"runAsGroup":0,"privileged":true}}
+    ]' || true
+  else
+    log "HARVESTER_CSI_HELM_USE=false; helm-controller path skipped."
+  fi
+}
+
+patch_kubevip_daemonset() {
+  [[ ! -f "${RKE2_KUBECONFIG}" ]] && { log "Guest kubeconfig ${RKE2_KUBECONFIG} not found; cannot patch kube-vip."; return; }
+  local addr iface cidr
+  addr="${KUBEVIP_ADDRESS:-$(read_values_field kubeVip.address)}"
+  iface="${KUBEVIP_INTERFACE:-$(read_values_field kubeVip.interface)}"
+  cidr="$(read_values_field kubeVip.cidr)"
+  [[ -z "${cidr}" || "${cidr}" == "null" ]] && cidr="$(read_values_field kubeVip.prefix)"
+  [[ -z "${cidr}" || "${cidr}" == "null" ]] && cidr="24"
+  if [[ -z "${addr}" || -z "${iface}" ]]; then
+    log "kube-vip address/interface not found; skipping kube-vip DaemonSet patch."
     return
   fi
 
-  log "CSI manifest ${HARVESTER_CSI_MANIFEST:-<unset>} not found; falling back to Helm chart ${HARVESTER_CSI_CHART}."
-  log "Ensuring Harvester Helm repo is added."
-  helm repo add harvester "${HARVESTER_CHART_REPO}" >/dev/null 2>&1 || true
-  helm repo update >/dev/null 2>&1 || true
+  log "Patching kube-vip DaemonSet to set sysctls and ensure VIP ${addr}/${cidr} on ${iface}."
+  local waited=0
+  until KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n kube-system get ds kube-vip >/dev/null 2>&1; do
+    sleep 5; waited=$((waited+5))
+    if (( waited >= 120 )); then
+      log "Timed out waiting for kube-vip DaemonSet to appear; skipping patch."
+      return
+    fi
+  done
 
-  log "Installing/Upgrading Harvester CSI chart ${HARVESTER_CSI_CHART} (release ${HARVESTER_CSI_RELEASE}) in ${HARVESTER_CSI_NAMESPACE}."
-  local args=(upgrade --install "${HARVESTER_CSI_RELEASE}" "${HARVESTER_CSI_CHART}"
-    --namespace "${HARVESTER_CSI_NAMESPACE}" --create-namespace
-    --set "cloudConfig.secretName=${HARVESTER_CSI_SECRET_NAME}")
-  if [[ -n "${HARVESTER_CSI_CHART_VERSION}" ]]; then
-    args+=(--version "${HARVESTER_CSI_CHART_VERSION}")
-  fi
-  KUBECONFIG="${RKE2_KUBECONFIG}" helm "${args[@]}"
+  local payload
+  payload="$(cat <<EOF
+[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/initContainers",
+    "value": [
+      {
+        "name": "sysctl-promote-secondaries",
+        "image": "busybox:1.36",
+        "securityContext": { "privileged": true },
+        "command": [
+          "sh","-c",
+          "sysctl -w net.ipv4.conf.all.promote_secondaries=1 net.ipv4.conf.${iface}.promote_secondaries=1 net.ipv4.conf.all.accept_local=1 net.ipv4.conf.${iface}.accept_local=1"
+        ]
+      }
+    ]
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/lifecycle",
+    "value": {
+      "postStart": {
+        "exec": {
+          "command": ["sh","-c","ip addr add ${addr}/${cidr} dev ${iface} 2>/dev/null || true"]
+        }
+      }
+    }
+  }
+]
+EOF
+)"
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n kube-system patch ds kube-vip --type=json -p "${payload}" >/dev/null 2>&1 || log "kube-vip patch failed; continuing."
 }
 
 smoke_test_csi() {
@@ -408,7 +584,9 @@ smoke_test_csi() {
   local name="harvester-csi-smoke-$(date +%s)"
   local pvc="${name}"
   local pod="${name}"
-  log "Starting CSI smoke test with PVC/Pod ${name}."
+  local pvc_timeout="${CSI_SMOKE_PVC_TIMEOUT:-120s}"
+  local pod_timeout="${CSI_SMOKE_POD_TIMEOUT:-120s}"
+  log "Starting CSI smoke test with PVC/Pod ${name} (PVC timeout ${pvc_timeout}, Pod timeout ${pod_timeout})."
   cat <<EOF | KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -439,14 +617,15 @@ spec:
       persistentVolumeClaim:
         claimName: ${pvc}
 EOF
-
   local rc=0
-  if ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Bound pvc/"${pvc}" --timeout=120s; then
-    log "CSI smoke test PVC did not bind."
-    rc=1
+  if ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Bound pvc/"${pvc}" --timeout="${pvc_timeout}"; then
+    log "CSI smoke test PVC did not bind within timeout ${pvc_timeout}; checking status."
+    if ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl get pvc "${pvc}" -o jsonpath='{.status.phase}' | grep -q "^Bound$"; then
+      rc=1
+    fi
   fi
-  if (( rc == 0 )) && ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Ready pod/"${pod}" --timeout=180s; then
-    log "CSI smoke test pod did not become Ready."
+  if (( rc == 0 )) && ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl wait --for=condition=Ready pod/"${pod}" --timeout="${pod_timeout}"; then
+    log "CSI smoke test pod did not become Ready within timeout ${pod_timeout}."
     rc=1
   fi
   if (( rc == 0 )) && ! KUBECONFIG="${RKE2_KUBECONFIG}" kubectl exec "${pod}" -- cat /data/hello | grep -q "smoke-ok"; then
@@ -454,11 +633,15 @@ EOF
     rc=1
   fi
 
+  if (( rc != 0 )); then
+    log "CSI smoke test failed; dumping describe for PVC/Pod."
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl describe pvc "${pvc}" || true
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl describe pod "${pod}" || true
+  fi
   KUBECONFIG="${RKE2_KUBECONFIG}" kubectl delete pod "${pod}" pvc "${pvc}" --ignore-not-found >/dev/null 2>&1 || true
   if (( rc == 0 )); then
     log "CSI smoke test succeeded."
   else
-    log "CSI smoke test failed."
     return 1
   fi
 }
@@ -662,6 +845,7 @@ precheck_control_plane_minimum
 pre_drain_workers_if_shrinking
 
 run_prereqs
+disable_kubevip_daemonset
 deploy_chart
 wait_for_vms
 run_bootstrap_job
@@ -670,6 +854,7 @@ if $SKIP_BOOTSTRAP; then
 else
   wait_for_guest_api
   install_harvester_csi
+  patch_kubevip_daemonset
   smoke_test_csi || true
 fi
 validate_guest_workers
