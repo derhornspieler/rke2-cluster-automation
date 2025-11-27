@@ -86,7 +86,7 @@ kubeVip:
   vip_interface: eth0                # Interface for the VIP
   vip_cidr: ""                       # CIDR for the VIP (e.g. 172.16.3.1/24 or just 24)
   imageRepository: ghcr.io/kube-vip/kube-vip
-  imageTag: v0.8.9
+  imageTag: v1.0.2
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
   ttl: 30
