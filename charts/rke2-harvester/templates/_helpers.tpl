@@ -794,10 +794,13 @@ runcmd:
     SERVICE="rke2-server"
     if echo "${HOSTNAME}" | grep -q -- "-cp-1$"; then
       sed -i '/^server:/d' /etc/rancher/rke2/config.yaml
+      sed -i '/^cluster-init:/d' /etc/rancher/rke2/config.yaml
+      echo "cluster-init: true" >> /etc/rancher/rke2/config.yaml
     fi
     if echo "${HOSTNAME}" | grep -q -- "-wk-"; then
       INSTALL_TYPE="agent"
       SERVICE="rke2-agent"
+      sed -i '/^cluster-init:/d' /etc/rancher/rke2/config.yaml
     fi
     curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=${INSTALL_TYPE} sh -
     systemctl enable ${SERVICE}.service

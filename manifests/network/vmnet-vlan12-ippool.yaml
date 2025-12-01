@@ -1,17 +1,17 @@
 apiVersion: network.harvesterhci.io/v1alpha1
 kind: IPPool
 metadata:
-  name: vlan2003
+  name: vlan12
   namespace: hvst-mgmt
 spec:
   ipv4Config:
-    serverIP: 172.16.3.2
+    serverIP: 172.16.3.10
     cidr: 172.16.3.0/24
     pool:
-      start: 172.16.3.10
-      end: 172.16.3.253
+      start: 172.16.3.50
+      end: 172.16.3.100
     router: 172.16.3.1
     dns:
     - 172.16.3.1
     leaseTime: 300
-  networkName: hvst-mgmt/vlan2003
+  networkName: hvst-mgmt/vlan12

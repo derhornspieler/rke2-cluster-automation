@@ -1,0 +1,93 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplate
+metadata:
+  name: rancher-mgr-template
+  namespace: hvst-mgmt
+  labels:
+    app: rancher-mgr
+  annotations:
+    harvesterhci.io/default-userdata-secret: rancher-mgr-cloud-config
+spec:
+  description: Rancher manager VM template (Rocky 9 with Docker and Rancher)
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplateVersion
+metadata:
+  name: rancher-mgr-template
+  namespace: hvst-mgmt
+  labels:
+    template.harvesterhci.io/templateID: rancher-mgr-template
+  annotations:
+    harvesterhci.io/default-userdata-secret: rancher-mgr-cloud-config
+spec:
+  templateId: hvst-mgmt/rancher-mgr-template
+  vm:
+    metadata:
+      labels:
+        app: rancher-mgr
+      annotations:
+        harvesterhci.io/volumeClaimTemplates: |-
+          [{
+              "metadata": {
+                "name": "rancher-mgr-rootdisk",
+                "annotations": {
+                  "harvesterhci.io/imageId": "harvester-public/rocky-9-cloudimg"
+                }
+              },
+              "spec": {
+              "accessModes": ["ReadWriteMany"],
+              "resources": {
+                "requests": {
+                  "storage": "40Gi"
+                }
+              },
+              "storageClassName": "longhorn-rocky-9-cloudimg",
+              "volumeMode": "Block"
+            }
+          }]
+    spec:
+      runStrategy: Always
+      template:
+        metadata:
+          labels:
+            app: rancher-mgr
+        spec:
+          domain:
+            cpu:
+              cores: 8
+            resources:
+              requests:
+                memory: 32Gi
+              limits:
+                cpu: "8"
+                memory: 32Gi
+            firmware:
+              bootloader:
+                efi:
+                  secureBoot: false
+            devices:
+              disks:
+                - name: rootdisk
+                  bootOrder: 1
+                  disk:
+                    bus: virtio
+                - name: cloudinit
+                  disk:
+                    bus: virtio
+              interfaces:
+                - name: primary
+                  model: virtio
+                  macAddress: "02:de:ad:be:ef:01"
+                  bridge: {}
+          networks:
+            - name: primary
+              multus:
+                networkName: hvst-mgmt/vlan12
+          volumes:
+            - name: rootdisk
+              persistentVolumeClaim:
+                claimName: rancher-mgr-rootdisk
+            - name: cloudinit
+              cloudInitNoCloud:
+                secretRef:
+                  name: rancher-mgr-cloud-config

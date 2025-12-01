@@ -1,0 +1,156 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineTemplateVersion
+metadata:
+  annotations:
+    harvesterhci.io/default-userdata-secret: raw-image-template-userdata
+  creationTimestamp: '2025-11-17T13:39:36Z'
+  generation: 2
+  labels:
+    template.harvesterhci.io/templateID: raw-image-base-template
+  managedFields:
+    - apiVersion: harvesterhci.io/v1beta1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:metadata:
+          f:annotations:
+            .: {}
+            f:harvesterhci.io/default-userdata-secret: {}
+          f:labels:
+            .: {}
+            f:template.harvesterhci.io/templateID: {}
+          f:ownerReferences:
+            .: {}
+            k:{"uid":"a06ee831-d812-4b01-98ec-c0ac2505671b"}: {}
+        f:spec:
+          .: {}
+          f:templateId: {}
+          f:vm:
+            .: {}
+            f:metadata:
+              .: {}
+              f:annotations:
+                .: {}
+                f:harvesterhci.io/volumeClaimTemplates: {}
+              f:creationTimestamp: {}
+            f:spec:
+              .: {}
+              f:runStrategy: {}
+              f:template:
+                .: {}
+                f:metadata:
+                  .: {}
+                  f:creationTimestamp: {}
+                f:spec:
+                  .: {}
+                  f:domain:
+                    .: {}
+                    f:cpu:
+                      .: {}
+                      f:cores: {}
+                    f:devices:
+                      .: {}
+                      f:disks: {}
+                      f:interfaces: {}
+                    f:features:
+                      .: {}
+                      f:acpi:
+                        .: {}
+                        f:enabled: {}
+                    f:resources:
+                      .: {}
+                      f:limits:
+                        .: {}
+                        f:cpu: {}
+                        f:memory: {}
+                  f:evictionStrategy: {}
+                  f:networks: {}
+                  f:volumes: {}
+        f:status:
+          .: {}
+          f:conditions: {}
+          f:version: {}
+      manager: harvester
+      operation: Update
+      time: '2025-11-17T13:41:13Z'
+  name: raw-image-base-version
+  namespace: harvester-public
+  ownerReferences:
+    - apiVersion: harvesterhci.io/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: VirtualMachineTemplate
+      name: raw-image-base-template
+      uid: a06ee831-d812-4b01-98ec-c0ac2505671b
+  resourceVersion: '6951'
+  uid: 4f5ded0e-4828-49c3-88fc-7ce6437a80e8
+spec:
+  templateId: harvester-public/raw-image-base-template
+  vm:
+    metadata:
+      annotations:
+        harvesterhci.io/volumeClaimTemplates: |-
+          [{
+            "metadata": {
+              "name": "pvc-rootdisk",
+              "annotations": {
+                "harvesterhci.io/imageId": ""
+              }
+            },
+            "spec":{
+              "accessModes": ["ReadWriteMany"],
+              "resources":{
+                "requests":{
+                  "storage": "10Gi"
+                }
+              },
+              "volumeMode": "Block"
+            }
+          }]
+      creationTimestamp: null
+    spec:
+      runStrategy: RerunOnFailure
+      template:
+        metadata:
+          creationTimestamp: null
+        spec:
+          domain:
+            cpu:
+              cores: 1
+            devices:
+              disks:
+                - bootOrder: 1
+                  disk:
+                    bus: virtio
+                  name: rootdisk
+              interfaces:
+                - masquerade: {}
+                  model: virtio
+                  name: default
+            features:
+              acpi:
+                enabled: true
+            resources:
+              limits:
+                cpu: '1'
+                memory: 2Gi
+          evictionStrategy: LiveMigrateIfPossible
+          networks:
+            - name: default
+              pod: {}
+          volumes:
+            - name: rootdisk
+              persistentVolumeClaim:
+                claimName: pvc-rootdisk
+            - cloudInitNoCloud:
+                secretRef:
+                  name: raw-image-template-userdata
+              name: cloudinitdisk
+status:
+  conditions:
+    - lastUpdateTime: '2025-11-17T13:41:12Z'
+      status: 'True'
+      type: ready
+    - lastUpdateTime: '2025-11-17T13:41:13Z'
+      status: 'True'
+      type: assigned
+  version: 1
