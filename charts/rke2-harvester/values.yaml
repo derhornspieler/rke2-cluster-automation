@@ -119,6 +119,138 @@ rke2:
   version: "v1.33.5+rke2r1"        # RKE2 version you want to run
   cni: "canal"                     # or calico, multus, etc.
 
+# ------------------------------------------------------------------
+# Airgap / offline deployment overrides
+# ------------------------------------------------------------------
+# Leave values empty ("") to use public internet defaults.
+# Only set the fields you need to override for your environment.
+#
+# NOTE: The following are already configurable via their own sections
+# and do NOT need to be duplicated here:
+#   kubeVip.imageRepository / kubeVip.imageTag  (kube-vip image)
+#   vmDeployment.image                          (kubectl job image)
+#   rancherManager.chartRepo                    (Rancher Helm repo)
+#   metallb.chartRepo                           (MetalLB Helm repo)
+#   certManager.chartRepo                       (cert-manager Helm repo)
+airgap:
+  # --------------- Private CA Certificate ---------------
+  # PEM-encoded CA certificate for trusting private registries and
+  # internal services. Written to /etc/pki/ca-trust/source/anchors/
+  # on each VM and added to the system trust store via update-ca-trust.
+  # Also referenced in registries.yaml tls.ca_file if registries are configured.
+  # Paste the full PEM block including BEGIN/END lines.
+  privateCA: ""
+
+  # --------------- RKE2 Private Registry (registries.yaml) ---------------
+  # Written to /etc/rancher/rke2/registries.yaml on each VM before RKE2 starts.
+  # Supports HTTPS registries, OCI registries, mirror endpoints, auth, and TLS.
+  # See: https://docs.rke2.io/install/containerd_registry_configuration
+  registries:
+    # Mirror configuration: map public registries to private endpoints.
+    # Example:
+    #   mirrors:
+    #     docker.io:
+    #       endpoint:
+    #         - "https://registry.internal:5000"
+    #     ghcr.io:
+    #       endpoint:
+    #         - "https://registry.internal:5000"
+    #     "registry.k8s.io":
+    #       endpoint:
+    #         - "https://registry.internal:5000"
+    mirrors: {}
+
+    # Per-registry auth and TLS configuration.
+    # When privateCA is set, ca_file is auto-populated; you can also set it explicitly.
+    # Example:
+    #   configs:
+    #     "registry.internal:5000":
+    #       auth:
+    #         username: admin
+    #         password: secret
+    #       tls:
+    #         insecure_skip_verify: false
+    configs: {}
+
+  # --------------- RKE2 System Default Registry ---------------
+  # Prepended to all RKE2 system images (pause, etcd, kube-apiserver, etc.)
+  # Example: "registry.internal:5000"
+  systemDefaultRegistry: ""
+
+  # --------------- RKE2 Installation ---------------
+  # Override the RKE2 install script URL. Default: https://get.rke2.io
+  rke2InstallUrl: ""
+
+  # Installation method: "rpm" (default on RHEL/Rocky) or "tar" (for full airgap).
+  # When "tar", set rke2ArtifactPath to the directory containing pre-downloaded tarballs.
+  rke2InstallMethod: ""
+
+  # Local path on the VM to pre-staged RKE2 artifacts (tarballs + images).
+  # Used with rke2InstallMethod: "tar".
+  # The artifacts must be pre-loaded onto the VM (e.g. via cloud-init write_files
+  # or a shared filesystem). Default location if empty: not set.
+  rke2ArtifactPath: ""
+
+  # --------------- Package Repositories (yum/dnf) ---------------
+  # Custom yum/dnf repo definitions written to /etc/yum.repos.d/ on each VM.
+  # Use for local mirrors of Rocky Linux BaseOS/AppStream/Extras and
+  # RKE2 RPM repos (rke2-common, rke2-<version>, rke2-selinux).
+  #
+  # Each entry creates a repo file: /etc/yum.repos.d/<key>.repo
+  # Example:
+  #   yumRepos:
+  #     local-baseos:
+  #       name: "Local BaseOS Mirror"
+  #       baseurl: "http://repo.internal/rocky/9/BaseOS/x86_64/os/"
+  #       gpgcheck: false
+  #     local-appstream:
+  #       name: "Local AppStream Mirror"
+  #       baseurl: "http://repo.internal/rocky/9/AppStream/x86_64/os/"
+  #       gpgcheck: false
+  #     rke2-common:
+  #       name: "RKE2 Common"
+  #       baseurl: "http://repo.internal/rke2/latest/common/centos/9/noarch"
+  #       gpgcheck: false
+  #     rke2-version:
+  #       name: "RKE2 v1.33"
+  #       baseurl: "http://repo.internal/rke2/latest/1.33/centos/9/x86_64"
+  #       gpgcheck: false
+  yumRepos: {}
+
+  # Disable default Rocky Linux repos (rocky.repo, rocky-extras.repo, etc.)
+  # Set to true for fully airgapped environments that use only custom yumRepos above.
+  disableDefaultRepos: false
+
+  # --------------- Container Images ---------------
+  # Override images used by deployment tooling (outside RKE2's image management).
+  images:
+    # kube-vip init container, kube-vip DaemonSet patch, and CSI smoke test.
+    # Default: busybox:1.36
+    busybox: ""
+
+    # Bootstrap job that extracts kubeconfig from the control-plane VM.
+    # Default: docker.io/library/alpine:3.20
+    bootstrap: ""
+
+  # --------------- OS Images ---------------
+  # Override Harvester VirtualMachineImage download URLs.
+  osImages:
+    # Default: https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img
+    ubuntu: ""
+    # Default: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2
+    rocky9: ""
+
+  # --------------- CSI Snapshot CRDs ---------------
+  # Override URLs for CSI snapshot CRD manifests (applied on the guest cluster).
+  # Accepts URLs or local file paths.
+  csiSnapshotCrdUrls:
+    # Default: https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+    volumeSnapshotClasses: ""
+    # Default: https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+    volumeSnapshotContents: ""
+    # Default: https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+    volumeSnapshots: ""
+
 rancherManager:
   enabled: false
   chartRepo: https://releases.rancher.com/server-charts/latest

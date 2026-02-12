@@ -420,7 +420,7 @@ spec:
   {{- end }}
 {{- end }}
 {{- range $idx, $pool := $pools }}
-{{- $poolName := $pool.name | default (printf "%s-pool-%d" $chartName (add $idx 1)) -}}
+{{- $poolName := $pool.name | default (printf "%s-pool-%d" $chartName (add $idx 1)) }}
 ---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
@@ -464,6 +464,7 @@ spec:
 {{- end -}}
 
 {{- define "rke2-harvester.kubeVipStaticManifest" -}}
+{{- $airgapKV := (.Values.airgap).images | default dict -}}
 {{- $vip := .Values.kubeVip -}}
 {{- $namespace := default "kube-system" $vip.namespace -}}
 {{- $defaultSA := printf "%s-kube-vip" (include "rke2-harvester.fullname" .) -}}
@@ -497,7 +498,7 @@ spec:
         - operator: Exists
       initContainers:
         - name: sysctl-promote-secondaries
-          image: busybox:1.36
+          image: {{ $airgapKV.busybox | default "busybox:1.36" }}
           securityContext:
             privileged: true
           command:
@@ -550,6 +551,10 @@ spec:
 {{- end -}}
 
 {{- define "rke2-harvester.userData" -}}
+{{- $airgap := .Values.airgap | default dict -}}
+{{- $airgapImages := $airgap.images | default dict -}}
+{{- $airgapRegistries := $airgap.registries | default dict -}}
+{{- $airgapYumRepos := $airgap.yumRepos | default dict -}}
 #cloud-config
 package_update: true
 package_upgrade: true
@@ -581,16 +586,20 @@ write_files:
       cni:
         - {{ .Values.rke2.cni }}
       cloud-provider-name: harvester
+{{- if $airgap.systemDefaultRegistry }}
+      system-default-registry: {{ $airgap.systemDefaultRegistry | quote }}
+{{- end }}
 {{- $kubeVip := .Values.kubeVip | default dict -}}
+{{- $hasVipAddress := $kubeVip.address -}}
 {{- $hasVip := and ($kubeVip.enabled | default false) $kubeVip.address }}
 {{- $useDaemonSet := $kubeVip.useDaemonSet | default true -}}
 {{- $vipRBAC := and $hasVip ($kubeVip.rbac.create | default true) }}
-{{- if $hasVip }}
+{{- if $hasVipAddress }}
       server: https://{{ $kubeVip.address }}:9345
 {{- end }}
-{{- if or $hasVip (gt (len .Values.tlsSANs) 0) }}
+{{- if or $hasVipAddress (gt (len .Values.tlsSANs) 0) }}
       tls-san:
-{{- if $hasVip }}
+{{- if $hasVipAddress }}
         - {{ $kubeVip.address }}
 {{- end }}
 {{- range .Values.tlsSANs }}
@@ -610,6 +619,39 @@ write_files:
     permissions: "0644"
     content: |
 {{ include "rke2-harvester.kubeVipStaticManifest" . | indent 6 }}
+{{- end }}
+{{- if $hasVipAddress }}
+  - path: /var/lib/rancher/rke2/server/manifests/harvester-cloud-provider-config.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChartConfig
+      metadata:
+        name: harvester-cloud-provider
+        namespace: kube-system
+      spec:
+        valuesContent: |
+          kube-vip:
+            enabled: true
+            image:
+              repository: {{ $kubeVip.imageRepository | default "ghcr.io/kube-vip/kube-vip" }}
+              tag: {{ $kubeVip.imageTag | default "v1.0.4" | quote }}
+            config:
+              address: {{ $kubeVip.address | quote }}
+            tolerations:
+              - operator: Exists
+            env:
+              vip_interface: {{ ($kubeVip.interface | default "eth0") | quote }}
+              vip_arp: "true"
+              lb_enable: "false"
+              lb_port: "6443"
+              vip_cidr: {{ $kubeVip.vip_subnet | default "24" | quote }}
+              vip_subnet: {{ $kubeVip.vip_subnet | default "24" | quote }}
+              cp_enable: "true"
+              svc_enable: "false"
+              vip_leaderelection: "true"
+              enable_service_security: "false"
 {{- end }}
 {{- $rm := .Values.rancherManager | default dict -}}
 {{- $rancherEnabled := $rm.enabled | default false -}}
@@ -749,8 +791,6 @@ write_files:
   - path: {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" }}
     owner: root:root
     permissions: "0644"
-    selinux:
-      context: system_u:object_r:container_file_t:s0
     content: |
 {{ $cloudProvider.cloudConfig | indent 6 }}
 {{- end }}
@@ -778,15 +818,58 @@ write_files:
     content: |
 {{ include "rke2-harvester.metallbAddressPoolsYAML" . | indent 6 }}
 {{- end }}
+{{- if $airgap.privateCA }}
+  - path: /etc/pki/ca-trust/source/anchors/private-ca.crt
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ $airgap.privateCA | indent 6 }}
+  - path: /etc/rancher/rke2/certs/private-ca.crt
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ $airgap.privateCA | indent 6 }}
+{{- end }}
+{{- if or $airgapRegistries.mirrors $airgapRegistries.configs }}
+  - path: /etc/rancher/rke2/registries.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{- if $airgapRegistries.mirrors }}
+      mirrors:
+{{ toYaml $airgapRegistries.mirrors | indent 8 }}
+{{- end }}
+{{- if $airgapRegistries.configs }}
+      configs:
+{{ toYaml $airgapRegistries.configs | indent 8 }}
+{{- end }}
+{{- end }}
+{{- range $repoId, $repo := $airgapYumRepos }}
+  - path: /etc/yum.repos.d/{{ $repoId }}.repo
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [{{ $repoId }}]
+      name={{ $repo.name | default $repoId }}
+      baseurl={{ $repo.baseurl }}
+      enabled={{ if hasKey $repo "enabled" }}{{ if $repo.enabled }}1{{ else }}0{{ end }}{{ else }}1{{ end }}
+      gpgcheck={{ if hasKey $repo "gpgcheck" }}{{ if $repo.gpgcheck }}1{{ else }}0{{ end }}{{ else }}0{{ end }}
+{{- if $repo.gpgkey }}
+      gpgkey={{ $repo.gpgkey }}
+{{- end }}
+{{- end }}
 chpasswd:
   list: |
     {{ .Values.ssh.user }}:{{ .Values.ssh.password | default "rocky2025" }}
   expire: false
 runcmd:
-  - systemctl enable --now qemu-guest-agent.service
-{{- if $cloudProvider.cloudConfig }}
-  - chcon -t container_file_t {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" }} || true
+{{- if $airgap.privateCA }}
+  - update-ca-trust force-enable && update-ca-trust extract
 {{- end }}
+{{- if $airgap.disableDefaultRepos }}
+  - "sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/rocky*.repo || true"
+{{- end }}
+  - systemctl enable --now qemu-guest-agent.service
   - |
     set -euo pipefail
     HOSTNAME="$(hostname)"
@@ -802,9 +885,34 @@ runcmd:
       SERVICE="rke2-agent"
       sed -i '/^cluster-init:/d' /etc/rancher/rke2/config.yaml
     fi
-    curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=${INSTALL_TYPE} sh -
+{{- $installUrl := $airgap.rke2InstallUrl | default "https://get.rke2.io" }}
+{{- $installMethod := $airgap.rke2InstallMethod | default "" }}
+{{- $artifactPath := $airgap.rke2ArtifactPath | default "" }}
+    curl -sfL {{ $installUrl }} | \
+      INSTALL_RKE2_TYPE=${INSTALL_TYPE} \
+{{- if .Values.rke2.version }}
+      INSTALL_RKE2_VERSION={{ .Values.rke2.version | quote }} \
+{{- end }}
+{{- if $installMethod }}
+      INSTALL_RKE2_METHOD={{ $installMethod }} \
+{{- end }}
+{{- if $artifactPath }}
+      INSTALL_RKE2_ARTIFACT_PATH={{ $artifactPath }} \
+{{- end }}
+      sh -
     systemctl enable ${SERVICE}.service
     systemctl start ${SERVICE}.service
+{{- if $cloudProvider.cloudConfig }}
+    # Wait for RKE2 to initialize directory structure, then fix SELinux context
+    # so containers with container_t domain can read the cloud-provider-config.
+    for i in $(seq 1 30); do
+      if [ -f {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" | quote }} ]; then
+        chcon -t container_file_t {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" | quote }}
+        break
+      fi
+      sleep 2
+    done
+{{- end }}
   - |
     cat <<'EOF' >/usr/local/bin/clear-harvester-taint.sh
     #!/bin/bash

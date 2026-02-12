@@ -2,7 +2,7 @@ apiVersion: network.harvesterhci.io/v1alpha1
 kind: IPPool
 metadata:
   name: vlan12
-  namespace: hvst-mgmt
+  namespace: default
 spec:
   ipv4Config:
     serverIP: 172.16.3.10
@@ -14,4 +14,4 @@ spec:
     dns:
     - 172.16.3.1
     leaseTime: 300
-  networkName: hvst-mgmt/vlan12
+  networkName: default/vm-network

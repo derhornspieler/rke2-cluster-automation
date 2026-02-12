@@ -32,7 +32,6 @@ KUBEVIP_ADDRESS=""
 KUBEVIP_INTERFACE=""
 
 IMAGE_MANIFESTS=(
-  "${REPO_ROOT}/manifests/image/ubuntu.yaml"
   "${REPO_ROOT}/manifests/image/rocky9.yaml"
 )
 
@@ -254,19 +253,66 @@ except Exception:
 PY
 }
 
+load_airgap_config() {
+  local val
+  val="$(read_values_field airgap.images.busybox)"
+  AIRGAP_BUSYBOX_IMAGE="${val:-busybox:1.36}"
+
+  val="$(read_values_field airgap.images.bootstrap)"
+  AIRGAP_BOOTSTRAP_IMAGE="${val:-docker.io/library/alpine:3.20}"
+
+  val="$(read_values_field airgap.osImages.ubuntu)"
+  AIRGAP_OS_IMAGE_UBUNTU="${val:-https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img}"
+
+  val="$(read_values_field airgap.osImages.rocky9)"
+  AIRGAP_OS_IMAGE_ROCKY9="${val:-https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2}"
+
+  val="$(read_values_field airgap.csiSnapshotCrdUrls.volumeSnapshotClasses)"
+  AIRGAP_CSI_CRD_CLASSES="${val:-https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml}"
+
+  val="$(read_values_field airgap.csiSnapshotCrdUrls.volumeSnapshotContents)"
+  AIRGAP_CSI_CRD_CONTENTS="${val:-https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml}"
+
+  val="$(read_values_field airgap.csiSnapshotCrdUrls.volumeSnapshots)"
+  AIRGAP_CSI_CRD_SNAPSHOTS="${val:-https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml}"
+}
+
 # Return first control-plane VMI IP (empty if none yet).
 get_control_plane_ip() {
+  # Prefer the first control-plane node (cp-1 / cluster-init node) since it
+  # bootstraps independently.  Other CP nodes need the VIP to join, so monitoring
+  # them before cp-1 is up would fail.
+  local prefix
+  prefix="$(read_values_field vmNamePrefix)"
+  [[ -z "${prefix}" || "${prefix}" == "null" ]] && prefix="${HELM_RELEASE}"
+  local init_name="${prefix}-cp-1"
+  local init_ip
+  init_ip="$(kubectl -n "${NAMESPACE}" get vmi "${init_name}" \
+    -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || true)"
+  if [[ -n "${init_ip}" ]]; then
+    echo "${init_ip}"
+    return
+  fi
+  # Fallback: return first CP with an IP
   kubectl -n "${NAMESPACE}" get vmi -l app.kubernetes.io/component=controlplane \
     -o jsonpath='{range .items[?(@.status.interfaces[0].ipAddress!="")]}{.status.interfaces[0].ipAddress}{"\n"}{end}' | head -n1
 }
 
 disable_kubevip_daemonset() {
+  KUBEVIP_ADDRESS="${KUBEVIP_ADDRESS:-$(read_values_field kubeVip.address)}"
+  KUBEVIP_INTERFACE="${KUBEVIP_INTERFACE:-$(read_values_field kubeVip.interface)}"
+  KUBEVIP_IMAGE_REPO="${KUBEVIP_IMAGE_REPO:-$(read_values_field kubeVip.imageRepository)}"
+  KUBEVIP_IMAGE_TAG="${KUBEVIP_IMAGE_TAG:-$(read_values_field kubeVip.imageTag)}"
+  [[ -z "${KUBEVIP_IMAGE_REPO}" || "${KUBEVIP_IMAGE_REPO}" == "null" ]] && KUBEVIP_IMAGE_REPO="ghcr.io/kube-vip/kube-vip"
+  [[ -z "${KUBEVIP_IMAGE_TAG}" || "${KUBEVIP_IMAGE_TAG}" == "null" ]] && KUBEVIP_IMAGE_TAG="v1.0.4"
+
   if [[ "${HARVESTER_KUBEVIP_DS_ENABLED}" == "true" ]]; then
-    log "Keeping kube-vip daemonset enabled (HARVESTER_KUBEVIP_DS_ENABLED=true)."
-    local vip addr iface
-    addr="${KUBEVIP_ADDRESS:-$(read_values_field kubeVip.address)}"
-    iface="${KUBEVIP_INTERFACE:-$(read_values_field kubeVip.interface)}"
-    # Force static kube-vip off in our chart.
+    # Use harvester-cloud-provider's bundled kube-vip DaemonSet instead of our
+    # chart's static manifest.  Disable our chart's kube-vip via overlay so only
+    # ONE kube-vip DaemonSet runs in the guest cluster.  The HelmChartConfig in
+    # cloud-init configures harvester-cloud-provider's kube-vip with the VIP
+    # address, tolerations, and cp_enable=true.
+    log "Disabling chart's kube-vip; harvester-cloud-provider's kube-vip will provide VIP ${KUBEVIP_ADDRESS}."
     local overlay="${TMP_DIR}/kubevip-disable-static.values.yaml"
     mkdir -p "${TMP_DIR}"
     cat <<EOF > "${overlay}"
@@ -274,8 +320,26 @@ kubeVip:
   enabled: false
 EOF
     HELM_EXTRA_VALUES+=("${overlay}")
-    # Ensure HelmChartConfig enables kube-vip and passes VIP/interface if provided.
-    cat <<EOF | kubectl apply -f -
+  else
+    log "kube-vip: chart provides API VIP ${KUBEVIP_ADDRESS} on ${KUBEVIP_INTERFACE} via cloud-init static manifest."
+  fi
+}
+
+configure_guest_kubevip() {
+  [[ ! -f "${RKE2_KUBECONFIG}" ]] && { log "Guest kubeconfig not found; skipping guest kube-vip configuration."; return; }
+  local addr="${KUBEVIP_ADDRESS:-}"
+  local iface="${KUBEVIP_INTERFACE:-}"
+  local cidr
+  cidr="$(read_values_field kubeVip.vip_subnet)"
+  [[ -z "${cidr}" || "${cidr}" == "null" ]] && cidr="24"
+  if [[ -z "${addr}" ]]; then
+    log "No kube-vip address configured; skipping guest kube-vip HelmChartConfig."
+    return
+  fi
+
+  if [[ "${HARVESTER_KUBEVIP_DS_ENABLED}" == "true" ]]; then
+    log "Configuring harvester-cloud-provider kube-vip on guest cluster (VIP ${addr}, interface ${iface})."
+    cat <<EOF | KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -285,21 +349,28 @@ spec:
   valuesContent: |
     kube-vip:
       enabled: true
+      image:
+        repository: "${KUBEVIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}"
+        tag: "${KUBEVIP_IMAGE_TAG:-v1.0.4}"
+      config:
+        address: "${addr}"
+      tolerations:
+        - operator: Exists
       env:
-        vip_address: ${addr:-""}
-        vip_interface: ${iface:-""}
+        vip_interface: "${iface}"
         vip_arp: "true"
-        lb_enable: "true"
+        lb_enable: "false"
         lb_port: "6443"
-        vip_cidr: "32"
-        cp_enable: "false"
-        svc_enable: "true"
+        vip_cidr: "${cidr}"
+        vip_subnet: "${cidr}"
+        cp_enable: "true"
+        svc_enable: "false"
         vip_leaderelection: "true"
+        enable_service_security: "false"
 EOF
-    return
-  fi
-  log "Disabling kube-vip daemonset from harvester-cloud-provider (keeping static kube-vip)."
-  cat <<EOF | kubectl apply -f -
+  else
+    log "Disabling harvester-cloud-provider kube-vip on guest cluster (using chart's kube-vip)."
+    cat <<EOF | KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f -
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -310,8 +381,8 @@ spec:
     kube-vip:
       enabled: false
 EOF
-  kubectl -n kube-system delete ds kube-vip --ignore-not-found >/dev/null 2>&1 || true
-  kubectl -n kube-system delete pod -l app.kubernetes.io/name=kube-vip --ignore-not-found >/dev/null 2>&1 || true
+    KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n kube-system delete ds kube-vip --ignore-not-found >/dev/null 2>&1 || true
+  fi
 }
 
 ensure_bootstrap_ssh_key() {
@@ -468,9 +539,10 @@ install_harvester_csi() {
   fi
 
   log "Ensuring CSI snapshot CRDs are present."
-  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
-    -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml \
-    -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml >/dev/null
+  KUBECONFIG="${RKE2_KUBECONFIG}" kubectl apply \
+    -f "${AIRGAP_CSI_CRD_CLASSES}" \
+    -f "${AIRGAP_CSI_CRD_CONTENTS}" \
+    -f "${AIRGAP_CSI_CRD_SNAPSHOTS}" >/dev/null
 
   log "Creating/Updating CSI cloud-config secret ${HARVESTER_CSI_SECRET_NAME} in namespace ${HARVESTER_CSI_NAMESPACE}."
   KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n "${HARVESTER_CSI_NAMESPACE}" create secret generic "${HARVESTER_CSI_SECRET_NAME}" \
@@ -551,7 +623,7 @@ patch_kubevip_daemonset() {
     "value": [
       {
         "name": "sysctl-promote-secondaries",
-        "image": "busybox:1.36",
+        "image": "${AIRGAP_BUSYBOX_IMAGE}",
         "securityContext": { "privileged": true },
         "command": [
           "sh","-c",
@@ -607,7 +679,7 @@ metadata:
 spec:
   containers:
     - name: busybox
-      image: busybox:1.36
+      image: ${AIRGAP_BUSYBOX_IMAGE}
       command: ["/bin/sh","-c","echo smoke-ok > /data/hello && sleep 300"]
       volumeMounts:
         - name: data
@@ -720,20 +792,33 @@ run_prereqs() {
       log "Image manifest ${manifest} not found; skipping."
       continue
     fi
+    local apply_manifest="${manifest}"
+    local basename
+    basename="$(basename "${manifest}")"
+    # Substitute OS image URLs if airgap overrides are set.
+    if [[ "${basename}" == "ubuntu.yaml" && "${AIRGAP_OS_IMAGE_UBUNTU}" != "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img" ]]; then
+      mkdir -p "${TMP_DIR}"
+      apply_manifest="${TMP_DIR}/airgap-${basename}"
+      sed "s|url: .*|url: ${AIRGAP_OS_IMAGE_UBUNTU}|" "${manifest}" > "${apply_manifest}"
+    elif [[ "${basename}" == "rocky9.yaml" && "${AIRGAP_OS_IMAGE_ROCKY9}" != "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2" ]]; then
+      mkdir -p "${TMP_DIR}"
+      apply_manifest="${TMP_DIR}/airgap-${basename}"
+      sed "s|url: .*|url: ${AIRGAP_OS_IMAGE_ROCKY9}|" "${manifest}" > "${apply_manifest}"
+    fi
     local image_name image_namespace
-    image_name=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.name}')
-    image_namespace=$(kubectl apply --dry-run=client -f "${manifest}" -o jsonpath='{.metadata.namespace}')
+    image_name=$(kubectl apply --dry-run=client -f "${apply_manifest}" -o jsonpath='{.metadata.name}')
+    image_namespace=$(kubectl apply --dry-run=client -f "${apply_manifest}" -o jsonpath='{.metadata.namespace}')
     image_namespace=${image_namespace:-default}
     if kubectl -n "${image_namespace}" get virtualmachineimage "${image_name}" >/dev/null 2>&1; then
       log "VirtualMachineImage ${image_namespace}/${image_name} already exists; skipping apply."
     else
-      kubectl apply -f "${manifest}"
+      kubectl apply -f "${apply_manifest}"
     fi
     vm_images+=("${image_namespace}/${image_name}")
   done
   wait_for_vm_images "${vm_images[@]}"
   kubectl apply -f "${REPO_ROOT}/manifests/network/networks.yaml"
-  kubectl apply -f "${REPO_ROOT}/manifests/network/vmnet-vlan2003-ippool.yaml"
+  kubectl apply -f "${REPO_ROOT}/manifests/network/vmnet-vlan12-ippool.yaml" 2>/dev/null || log "IPPool CRD not available; skipping (not needed for static IPs)."
   kubectl -n "${NAMESPACE}" create serviceaccount rke2-mgmt-cloud-provider \
     --dry-run=client -o yaml | kubectl apply -f -
   kubectl create clusterrolebinding rke2-cloud-provider-binding \
@@ -810,8 +895,15 @@ run_bootstrap_job() {
   wait_for_cp_ssh
   wait_for_cloud_init
   log "Running bootstrap job to extract guest kubeconfig."
+  local bootstrap_manifest="${REPO_ROOT}/manifests/bootstrap/bootstrap-job.yaml"
+  if [[ "${AIRGAP_BOOTSTRAP_IMAGE}" != "docker.io/library/alpine:3.20" ]]; then
+    mkdir -p "${TMP_DIR}"
+    bootstrap_manifest="${TMP_DIR}/airgap-bootstrap-job.yaml"
+    sed "s|image: docker.io/library/alpine:3.20|image: ${AIRGAP_BOOTSTRAP_IMAGE}|" \
+      "${REPO_ROOT}/manifests/bootstrap/bootstrap-job.yaml" > "${bootstrap_manifest}"
+  fi
   kubectl -n "${NAMESPACE}" delete job rke2-bootstrap --ignore-not-found >/dev/null 2>&1 || true
-  kubectl apply -f "${REPO_ROOT}/manifests/bootstrap/bootstrap-job.yaml"
+  kubectl apply -f "${bootstrap_manifest}"
   kubectl -n "${NAMESPACE}" wait --for=condition=complete job/rke2-bootstrap --timeout="${WAIT_SECONDS}s"
   kubectl -n "${NAMESPACE}" get secret rke2-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > "${RKE2_KUBECONFIG}"
   chmod 600 "${RKE2_KUBECONFIG}"
@@ -832,7 +924,7 @@ run_bootstrap_job() {
   fi
   kubectl --kubeconfig="${RKE2_KUBECONFIG}" config use-context rke2 >/dev/null 2>&1 || true
   log "Kubeconfig written to ${RKE2_KUBECONFIG}"
-  kubectl delete -f "${REPO_ROOT}/manifests/bootstrap/bootstrap-job.yaml"
+  kubectl delete -f "${bootstrap_manifest}"
 }
 
 require_bin helm
@@ -840,6 +932,7 @@ require_bin kubectl
 require_bin jq
 
 load_desired_shape "${VALUES_FILE}"
+load_airgap_config
 load_current_shape
 precheck_control_plane_minimum
 pre_drain_workers_if_shrinking
@@ -853,6 +946,7 @@ if $SKIP_BOOTSTRAP; then
   log "Skipping guest API wait because bootstrap was skipped."
 else
   wait_for_guest_api
+  configure_guest_kubevip
   install_harvester_csi
   patch_kubevip_daemonset
   smoke_test_csi || true
