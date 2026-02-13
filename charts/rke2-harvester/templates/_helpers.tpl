@@ -303,8 +303,36 @@ subjects:
 {{- if $svc.annotations }}
 {{- $_ := set $service "annotations" $svc.annotations -}}
 {{- end }}
+{{- if and ((.Values.gatewayAPI).enabled | default false) ((.Values.traefik).enabled | default false) }}
+{{- $_ := set $service "type" "ClusterIP" -}}
+{{- end }}
 {{- $_ := set $values "service" $service -}}
+{{- $resources := $rm.resources | default dict -}}
+{{- if $resources }}
+{{- $_ := set $values "resources" $resources -}}
+{{- end }}
 {{- $extraEnv := $rm.extraEnv | default (list) -}}
+{{- $cnpg := .Values.cloudNativePG | default (dict) -}}
+{{- if $cnpg.enabled }}
+{{- $cluster := $cnpg.cluster | default (dict) -}}
+{{- $clusterName := $cluster.name | default "rancher-postgres" -}}
+{{- $clusterNS := $cluster.namespace | default "cattle-system" -}}
+{{- $owner := $cluster.owner | default "rancher" -}}
+{{- $dbName := $cluster.database | default "rancher" -}}
+{{- $secretName := "rancher-db-credentials" -}}
+{{- if not $cnpg.password }}
+{{- $secretName = printf "%s-app" $clusterName -}}
+{{- end }}
+{{- $dbEnv := list
+  (dict "name" "CATTLE_DB_CATTLE_DRIVER" "value" "postgres")
+  (dict "name" "CATTLE_DB_CATTLE_HOST" "value" (printf "%s-rw.%s" $clusterName $clusterNS))
+  (dict "name" "CATTLE_DB_CATTLE_PORT" "value" "5432")
+  (dict "name" "CATTLE_DB_CATTLE_NAME" "value" $dbName)
+  (dict "name" "CATTLE_DB_CATTLE_USERNAME" "valueFrom" (dict "secretKeyRef" (dict "name" $secretName "key" "username")))
+  (dict "name" "CATTLE_DB_CATTLE_PASSWORD" "valueFrom" (dict "secretKeyRef" (dict "name" $secretName "key" "password")))
+-}}
+{{- $extraEnv = concat $extraEnv $dbEnv -}}
+{{- end }}
 {{- if gt (len $extraEnv) 0 }}
 {{- $_ := set $values "extraEnv" $extraEnv -}}
 {{- end }}
@@ -370,12 +398,27 @@ spec:
 
 {{- define "rke2-harvester.certManagerValues" -}}
 {{- $cm := .Values.certManager | default (dict) -}}
+{{- $gwEnabled := (.Values.gatewayAPI).enabled | default false -}}
 {{- if $cm.valuesContent }}
 {{ $cm.valuesContent }}
+{{- if $gwEnabled }}
+extraArgs:
+  - --enable-gateway-api
+{{- end }}
 {{- else if $cm.values }}
-{{ toYaml $cm.values }}
+{{- $vals := deepCopy $cm.values -}}
+{{- if $gwEnabled }}
+{{- $existing := $vals.extraArgs | default list -}}
+{{- $_ := set $vals "extraArgs" (append $existing "--enable-gateway-api") -}}
+{{- end }}
+{{ toYaml $vals }}
+{{- else }}
+{{- if $gwEnabled }}
+extraArgs:
+  - --enable-gateway-api
 {{- else }}
 {}
+{{- end }}
 {{- end }}
 {{- end -}}
 
@@ -404,6 +447,131 @@ spec:
   set:
     installCRDs: "true"
 {{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.cnpgValues" -}}
+{{- $cnpg := .Values.cloudNativePG | default (dict) -}}
+{{- if $cnpg.values }}
+{{ toYaml $cnpg.values }}
+{{- else }}
+{}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.cnpgHelmChart" -}}
+{{- $cnpg := .Values.cloudNativePG | default (dict) -}}
+{{- $helmNS := $cnpg.helmChartNamespace | default "kube-system" -}}
+{{- $targetNS := $cnpg.namespace | default "cnpg-system" -}}
+{{- $repo := $cnpg.chartRepo | default "https://cloudnative-pg.github.io/charts" -}}
+{{- $chart := $cnpg.chartName | default "cloudnative-pg" -}}
+{{- $releaseName := printf "%s-cnpg" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: {{ $releaseName }}
+  namespace: {{ $helmNS }}
+spec:
+  chart: {{ $chart }}
+  repo: {{ $repo | quote }}
+  targetNamespace: {{ $targetNS }}
+  createNamespace: true
+{{- if $cnpg.chartVersion }}
+  version: {{ $cnpg.chartVersion | quote }}
+{{- end }}
+  valuesContent: |
+{{ include "rke2-harvester.cnpgValues" . | indent 4 }}
+{{- end -}}
+
+{{- define "rke2-harvester.cnpgCluster" -}}
+{{- $cnpg := .Values.cloudNativePG | default (dict) -}}
+{{- $cluster := $cnpg.cluster | default (dict) -}}
+{{- $clusterName := $cluster.name | default "rancher-postgres" -}}
+{{- $clusterNS := $cluster.namespace | default "cattle-system" -}}
+{{- $pg := $cluster.postgresql | default (dict) -}}
+{{- $storage := $cluster.storage | default (dict) -}}
+{{- $resources := $cluster.resources | default (dict) -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $clusterName }}
+  namespace: {{ $clusterNS }}
+spec:
+  instances: {{ $cluster.instances | default 3 }}
+  bootstrap:
+    initdb:
+      database: {{ $cluster.database | default "rancher" }}
+      owner: {{ $cluster.owner | default "rancher" }}
+      dataChecksums: true
+  storage:
+    size: {{ $storage.size | default "20Gi" }}
+{{- if $storage.storageClass }}
+    storageClass: {{ $storage.storageClass }}
+{{- end }}
+{{- if $pg }}
+  postgresql:
+    parameters:
+{{ toYaml $pg | indent 6 }}
+{{- end }}
+{{- if $resources }}
+  resources:
+{{ toYaml $resources | indent 4 }}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.rancherDBSecret" -}}
+{{- $cnpg := .Values.cloudNativePG | default (dict) -}}
+{{- $cluster := $cnpg.cluster | default (dict) -}}
+{{- $clusterName := $cluster.name | default "rancher-postgres" -}}
+{{- $clusterNS := $cluster.namespace | default "cattle-system" -}}
+{{- $owner := $cluster.owner | default "rancher" -}}
+{{- $dbName := $cluster.database | default "rancher" -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rancher-db-credentials
+  namespace: {{ $clusterNS }}
+type: Opaque
+stringData:
+  username: {{ $owner }}
+  password: {{ $cnpg.password }}
+  host: {{ $clusterName }}-rw.{{ $clusterNS }}
+  port: "5432"
+  dbname: {{ $dbName }}
+{{- end -}}
+
+{{- define "rke2-harvester.rancherHPA" -}}
+{{- $hpa := .Values.rancherHPA | default (dict) -}}
+{{- $metrics := $hpa.metrics | default (dict) -}}
+{{- $cpu := $metrics.cpu | default (dict) -}}
+{{- $mem := $metrics.memory | default (dict) -}}
+{{- $rancherReleaseName := printf "%s-rancher" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $rm := .Values.rancherManager | default (dict) -}}
+{{- $rancherNS := $rm.namespace | default "cattle-system" -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $rancherReleaseName }}
+  namespace: {{ $rancherNS }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $rancherReleaseName }}
+  minReplicas: {{ $hpa.minReplicas | default 3 }}
+  maxReplicas: {{ $hpa.maxReplicas | default 7 }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ $cpu.averageUtilization | default 70 }}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {{ $mem.averageUtilization | default 80 }}
 {{- end -}}
 
 {{- define "rke2-harvester.metallbAddressPoolsYAML" -}}
@@ -461,6 +629,233 @@ spec:
 {{- end }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.ciliumHelmChartConfig" -}}
+{{- $cilium := .Values.cilium | default dict -}}
+{{- $kubeVip := .Values.kubeVip | default dict -}}
+{{- $extraValues := $cilium.values | default dict -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-cilium
+  namespace: kube-system
+spec:
+  valuesContent: |
+    kubeProxyReplacement: true
+    k8sServiceHost: {{ $kubeVip.address | default "127.0.0.1" | quote }}
+    k8sServicePort: "6443"
+    l2announcements:
+      enabled: true
+    externalIPs:
+      enabled: true
+{{- if $extraValues }}
+{{ toYaml $extraValues | indent 4 }}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.ciliumL2Resources" -}}
+{{- $cilium := .Values.cilium | default dict -}}
+{{- $l2 := $cilium.l2 | default dict -}}
+{{- $pools := $l2.addressPools | default list -}}
+{{- range $idx, $pool := $pools }}
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: {{ $pool.name | default (printf "pool-%d" (add $idx 1)) }}
+spec:
+  blocks:
+{{- range $addr := $pool.addresses | default list }}
+    - cidr: {{ $addr }}
+{{- end }}
+{{- if hasKey $pool "autoAssign" }}
+  allowFirstLastIPs: {{ if $pool.autoAssign }}Yes{{ else }}No{{ end }}
+{{- end }}
+{{- if and (hasKey $pool "autoAssign") (not $pool.autoAssign) }}
+  serviceSelector:
+    matchLabels:
+      cilium.io/pool: {{ $pool.name }}
+{{- end }}
+{{- end }}
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: l2-default
+spec:
+  loadBalancerIPs: true
+  externalIPs: true
+  interfaces:
+    - ^eth[0-9]+
+{{- end -}}
+
+{{- define "rke2-harvester.traefikValues" -}}
+{{- $traefik := .Values.traefik | default (dict) -}}
+{{- $svc := $traefik.service | default (dict) -}}
+{{- $extraValues := $traefik.values | default (dict) -}}
+providers:
+  kubernetesGateway:
+    enabled: true
+    experimentalChannel: true
+  kubernetesIngress:
+    enabled: true
+gateway:
+  enabled: false
+service:
+  type: {{ $svc.type | default "LoadBalancer" }}
+{{- if $svc.loadBalancerIP }}
+  spec:
+    loadBalancerIP: {{ $svc.loadBalancerIP | quote }}
+{{- end }}
+{{- if $svc.annotations }}
+  annotations:
+{{ toYaml $svc.annotations | indent 4 }}
+{{- end }}
+{{- if $extraValues }}
+{{ toYaml $extraValues }}
+{{- end }}
+{{- end -}}
+
+{{- define "rke2-harvester.traefikHelmChart" -}}
+{{- $traefik := .Values.traefik | default (dict) -}}
+{{- $helmNS := $traefik.helmChartNamespace | default "kube-system" -}}
+{{- $targetNS := $traefik.namespace | default "traefik-system" -}}
+{{- $repo := $traefik.chartRepo | default "https://traefik.github.io/charts" -}}
+{{- $chart := $traefik.chartName | default "traefik" -}}
+{{- $releaseName := printf "%s-traefik" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: {{ $releaseName }}
+  namespace: {{ $helmNS }}
+spec:
+  chart: {{ $chart }}
+  repo: {{ $repo | quote }}
+  targetNamespace: {{ $targetNS }}
+  createNamespace: true
+{{- if $traefik.chartVersion }}
+  version: {{ $traefik.chartVersion | quote }}
+{{- end }}
+  valuesContent: |
+{{ include "rke2-harvester.traefikValues" . | indent 4 }}
+{{- end -}}
+
+{{- define "rke2-harvester.gatewayAPICRDJob" -}}
+{{- $gw := .Values.gatewayAPI | default dict -}}
+{{- $version := $gw.crdVersion | default "v1.2.1" -}}
+{{- $crdUrl := $gw.crdUrl | default (printf "https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/standard-install.yaml" $version) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: install-gateway-api-crds
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: install-gateway-api-crds
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: install-gateway-api-crds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: install-gateway-api-crds
+subjects:
+  - kind: ServiceAccount
+    name: install-gateway-api-crds
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: install-gateway-api-crds
+  namespace: kube-system
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      serviceAccountName: install-gateway-api-crds
+      restartPolicy: OnFailure
+      containers:
+        - name: install
+          image: {{ .Values.vmDeployment.image | default "alpine/kubectl:1.34.2" }}
+          command:
+            - sh
+            - -c
+            - |
+              kubectl apply -f {{ $crdUrl }}
+{{- end -}}
+
+{{- define "rke2-harvester.rancherGateway" -}}
+{{- $gw := .Values.gatewayAPI | default dict -}}
+{{- $gwCfg := $gw.gateway | default dict -}}
+{{- $rm := .Values.rancherManager | default dict -}}
+{{- $rancherNS := $rm.namespace | default "cattle-system" -}}
+{{- $gwName := $gwCfg.name | default "rancher-gateway" -}}
+{{- $hostname := $gwCfg.hostname | default ($rm.hostname | default "") -}}
+{{- $issuerName := $gwCfg.certIssuerName | default "" -}}
+{{- $issuerKind := $gwCfg.certIssuerKind | default "ClusterIssuer" -}}
+{{- $rancherReleaseName := printf "%s-rancher" (include "rke2-harvester.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gwName }}
+  namespace: {{ $rancherNS }}
+{{- if $issuerName }}
+  annotations:
+    cert-manager.io/issuer: {{ $issuerName }}
+    cert-manager.io/issuer-kind: {{ $issuerKind }}
+{{- end }}
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: {{ $gwCfg.listenerPort | default 443 }}
+{{- if $hostname }}
+      hostname: {{ $hostname | quote }}
+{{- end }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ $gwName }}-tls
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rancher
+  namespace: {{ $rancherNS }}
+spec:
+  parentRefs:
+    - name: {{ $gwName }}
+      sectionName: https
+{{- if $hostname }}
+  hostnames:
+    - {{ $hostname | quote }}
+{{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $rancherReleaseName }}
+          port: 443
 {{- end -}}
 
 {{- define "rke2-harvester.kubeVipStaticManifest" -}}
@@ -580,6 +975,9 @@ write_files:
         - rke2-snapshot-controller
         - rke2-snapshot-controller-crd
         - rke2-snapshot-validation-webhook
+{{- if (.Values.traefik).enabled }}
+        - rke2-ingress-nginx
+{{- end }}
       node-label:
         - harvesterhci.io/managed=true
       token: "{{ .Values.rke2.token }}"
@@ -673,6 +1071,11 @@ write_files:
 {{- $tlsSecret := $rm.ingress.tlsSecret | default dict -}}
 {{- $tlsSecretEnabled := and $rancherEnabled ($tlsSecret.create | default false) $rancherNamespace ($rm.ingress.tlsSecretName | default "") ($tlsSecret.certificate | default "") ($tlsSecret.privateKey | default "") -}}
 {{- $cpAllowWorkloads := default true .Values.controlPlane.allowWorkloads -}}
+{{- $ciliumEnabled := (.Values.cilium).enabled | default false -}}
+{{- $ciliumL2Enabled := and $ciliumEnabled ((.Values.cilium).l2).enabled | default false -}}
+{{- $traefikEnabled := (.Values.traefik).enabled | default false -}}
+{{- $traefikNamespace := (.Values.traefik).namespace | default "traefik-system" -}}
+{{- $gwAPIEnabled := (.Values.gatewayAPI).enabled | default false -}}
 {{- if and $rancherEnabled $rancherNamespace }}
   - path: /var/lib/rancher/rke2/server/manifests/rancher-namespace.yaml
     owner: root:root
@@ -786,6 +1189,45 @@ write_files:
     content: |
 {{ include "rke2-harvester.rancherHelmChart" . | indent 6 }}
 {{- end }}
+{{- $cnpgEnabled := (.Values.cloudNativePG).enabled | default false -}}
+{{- if $cnpgEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/cnpg-namespace.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ (.Values.cloudNativePG).namespace | default "cnpg-system" }}
+{{- end }}
+{{- if $cnpgEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/cnpg-operator.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.cnpgHelmChart" . | indent 6 }}
+{{- end }}
+{{- if $cnpgEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/zz-cnpg-cluster.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.cnpgCluster" . | indent 6 }}
+{{- end }}
+{{- if and $cnpgEnabled (.Values.cloudNativePG).password }}
+  - path: /var/lib/rancher/rke2/server/manifests/zz-rancher-db-secret.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.rancherDBSecret" . | indent 6 }}
+{{- end }}
+{{- if and (.Values.rancherHPA).enabled $cnpgEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/zz-rancher-hpa.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.rancherHPA" . | indent 6 }}
+{{- end }}
 {{- $cloudProvider := .Values.cloudProvider | default (dict) -}}
 {{- if $cloudProvider.cloudConfig }}
   - path: {{ $cloudProvider.configPath | default "/var/lib/rancher/rke2/etc/config-files/cloud-provider-config" }}
@@ -818,6 +1260,51 @@ write_files:
     content: |
 {{ include "rke2-harvester.metallbAddressPoolsYAML" . | indent 6 }}
 {{- end }}
+{{- if $ciliumEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/cilium-config.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.ciliumHelmChartConfig" . | indent 6 }}
+{{- end }}
+{{- if $ciliumL2Enabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/zz-cilium-l2.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.ciliumL2Resources" . | indent 6 }}
+{{- end }}
+{{- if $gwAPIEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/00-gateway-api-crds.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.gatewayAPICRDJob" . | indent 6 }}
+{{- end }}
+{{- if and $traefikEnabled $traefikNamespace }}
+  - path: /var/lib/rancher/rke2/server/manifests/traefik-namespace.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ $traefikNamespace }}
+{{- end }}
+{{- if $traefikEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/traefik.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.traefikHelmChart" . | indent 6 }}
+{{- end }}
+{{- if and $gwAPIEnabled $rancherEnabled }}
+  - path: /var/lib/rancher/rke2/server/manifests/zz-rancher-gateway.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+{{ include "rke2-harvester.rancherGateway" . | indent 6 }}
+{{- end }}
 {{- if $airgap.privateCA }}
   - path: /etc/pki/ca-trust/source/anchors/private-ca.crt
     owner: root:root
@@ -831,6 +1318,17 @@ write_files:
 {{ $airgap.privateCA | indent 6 }}
 {{- end }}
 {{- if or $airgapRegistries.mirrors $airgapRegistries.configs }}
+{{- $mergedConfigs := dict -}}
+{{- range $regHost, $regCfg := ($airgapRegistries.configs | default dict) }}
+{{- $tlsCfg := $regCfg.tls | default dict -}}
+{{- if and $airgap.privateCA (not (hasKey $tlsCfg "ca_file")) }}
+{{- $newTls := merge (dict "ca_file" "/etc/rancher/rke2/certs/private-ca.crt") $tlsCfg -}}
+{{- $newCfg := merge (dict "tls" $newTls) $regCfg -}}
+{{- $_ := set $mergedConfigs $regHost $newCfg -}}
+{{- else }}
+{{- $_ := set $mergedConfigs $regHost $regCfg -}}
+{{- end }}
+{{- end }}
   - path: /etc/rancher/rke2/registries.yaml
     owner: root:root
     permissions: "0644"
@@ -839,9 +1337,9 @@ write_files:
       mirrors:
 {{ toYaml $airgapRegistries.mirrors | indent 8 }}
 {{- end }}
-{{- if $airgapRegistries.configs }}
+{{- if gt (len $mergedConfigs) 0 }}
       configs:
-{{ toYaml $airgapRegistries.configs | indent 8 }}
+{{ toYaml $mergedConfigs | indent 8 }}
 {{- end }}
 {{- end }}
 {{- range $repoId, $repo := $airgapYumRepos }}
@@ -901,7 +1399,14 @@ runcmd:
 {{- end }}
       sh -
     systemctl enable ${SERVICE}.service
-    systemctl start ${SERVICE}.service
+    systemctl start ${SERVICE}.service || true
+    # Wait for RKE2 to become healthy (Type=notify timeout is expected on first boot)
+    for i in $(seq 1 60); do
+      if systemctl is-active --quiet ${SERVICE}.service; then
+        break
+      fi
+      sleep 10
+    done
 {{- if $cloudProvider.cloudConfig }}
     # Wait for RKE2 to initialize directory structure, then fix SELinux context
     # so containers with container_t domain can read the cloud-provider-config.

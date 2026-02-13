@@ -251,6 +251,71 @@ airgap:
     # Default: https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
     volumeSnapshots: ""
 
+# ------------------------------------------------------------------
+# Cilium CNI + L2 LoadBalancer
+# ------------------------------------------------------------------
+# When enabled, set rke2.cni to "cilium" and Cilium replaces both
+# Canal (CNI) and MetalLB (L2 LoadBalancer). Uses HelmChartConfig
+# to customize the RKE2-bundled Cilium chart.
+cilium:
+  enabled: false
+  # L2 announcement configuration (replaces MetalLB)
+  l2:
+    enabled: false
+    # IP address pools for L2 announcements (CIDR notation)
+    addressPools: []
+    # Example:
+    #   - name: rancher-vip
+    #     addresses:
+    #       - 172.16.3.6/32
+    #     autoAssign: false
+    #   - name: general
+    #     addresses:
+    #       - 172.16.3.7/30
+    #     autoAssign: true
+  # Extra Helm values passed to the RKE2-bundled Cilium chart via HelmChartConfig
+  values: {}
+
+# ------------------------------------------------------------------
+# Traefik Gateway Controller
+# ------------------------------------------------------------------
+# Deploys Traefik as a Gateway API controller via HelmChart CRD.
+# Replaces rke2-ingress-nginx. Serves as the LoadBalancer entry point.
+traefik:
+  enabled: false
+  chartRepo: https://traefik.github.io/charts
+  chartName: traefik
+  chartVersion: ""
+  helmChartNamespace: kube-system
+  namespace: traefik-system
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""            # Static LB IP (from Cilium L2 pool)
+    annotations: {}
+  # Extra Helm values for Traefik
+  values: {}
+
+# ------------------------------------------------------------------
+# Gateway API
+# ------------------------------------------------------------------
+# Installs Gateway API CRDs and creates Gateway/HTTPRoute resources
+# for Rancher. Works with cert-manager gateway-shim for automatic TLS.
+gatewayAPI:
+  enabled: false
+  # Gateway API CRD version to install
+  crdVersion: "v1.2.1"
+  # Override CRD bundle URL (for airgap)
+  crdUrl: ""
+  # Gateway resource for Rancher
+  gateway:
+    name: rancher-gateway
+    namespace: cattle-system
+    listenerPort: 443
+    hostname: ""                  # e.g. rancher.aegisgroup.ch
+    # cert-manager gateway-shim annotations
+    certIssuerName: ""            # ClusterIssuer name for auto-TLS
+    certIssuerKind: ClusterIssuer
+
 rancherManager:
   enabled: false
   chartRepo: https://releases.rancher.com/server-charts/latest
@@ -261,6 +326,14 @@ rancherManager:
   hostname: ""
   bootstrapPassword: ""
   replicas: 3
+  # Pod resource requests/limits for HPA utilization metrics
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
   rancherManager:
     extraEnv:
       - name: CATTLE_SERVER_URL
@@ -277,6 +350,64 @@ rancherManager:
       certificate: ""          # Include PEM content, e.g. -----BEGIN CERTIFICATE-----
       privateKey: ""           # Include PEM content, e.g. -----BEGIN PRIVATE KEY-----
     extraAnnotations: {}
+
+# ------------------------------------------------------------------
+# CloudNativePG — External PostgreSQL for Rancher HA + HPA
+# ------------------------------------------------------------------
+# Deploys the CloudNativePG operator and a PostgreSQL Cluster for use
+# as Rancher's external database backend. Enables stateless Rancher
+# pods so HPA can scale them dynamically.
+cloudNativePG:
+  enabled: false
+
+  # --- CNPG Operator (Helm chart) ---
+  chartRepo: https://cloudnative-pg.github.io/charts
+  chartName: cloudnative-pg
+  chartVersion: ""                    # Pin a version, e.g. "0.23.0"
+  helmChartNamespace: kube-system     # Where the HelmChart CRD lives
+  namespace: cnpg-system              # Where the operator pods run
+  values: {}                          # Extra Helm values for the operator
+
+  # --- PostgreSQL Cluster ---
+  cluster:
+    name: rancher-postgres
+    namespace: cattle-system           # Same namespace as Rancher
+    instances: 3                       # 1 primary + 2 replicas
+    database: rancher
+    owner: rancher                     # PostgreSQL user/role
+    storage:
+      size: 20Gi
+      storageClass: ""                 # Leave empty for default (harvester)
+    postgresql:                        # postgresql.conf parameters
+      max_connections: "200"
+      shared_buffers: "256MB"
+    resources:                         # Pod resource requests/limits
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+
+  # --- Database credentials ---
+  # Password for the PostgreSQL "rancher" user.
+  # If empty, CNPG auto-generates credentials in a Secret named
+  # "<cluster.name>-app" (e.g. rancher-postgres-app).
+  password: ""
+
+# ------------------------------------------------------------------
+# Rancher HPA (Horizontal Pod Autoscaler)
+# ------------------------------------------------------------------
+# Requires cloudNativePG.enabled=true for stateless Rancher pods.
+rancherHPA:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 7
+  metrics:
+    cpu:
+      averageUtilization: 70
+    memory:
+      averageUtilization: 80
 
 metallb:
   enabled: false

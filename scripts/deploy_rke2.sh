@@ -440,10 +440,18 @@ wait_for_cloud_init() {
   status_out="$(ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
     rocky@"${cp_ip}" 'sudo cloud-init status --wait || true; sudo cloud-init status --long' 2>/dev/null || true)"
   if grep -q "status: error" <<<"${status_out}"; then
-    log "cloud-init reported failure on ${cp_ip}; recent log output follows:" >&2
-    ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-      rocky@"${cp_ip}" 'sudo tail -n 100 /var/log/cloud-init-output.log' >&2 || true
-    exit 1
+    log "cloud-init reported error on ${cp_ip}; checking if RKE2 is running..."
+    local rke2_active
+    rke2_active="$(ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+      rocky@"${cp_ip}" 'sudo systemctl is-active rke2-server || sudo systemctl is-active rke2-agent' 2>/dev/null || true)"
+    if [[ "${rke2_active}" == "active" ]]; then
+      log "RKE2 is active despite cloud-init error. Continuing..."
+    else
+      log "RKE2 is NOT active. Cloud-init failure log:" >&2
+      ssh -i "${BOOTSTRAP_SSH_KEY}" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+        rocky@"${cp_ip}" 'sudo tail -n 100 /var/log/cloud-init-output.log' >&2 || true
+      exit 1
+    fi
   fi
   log "cloud-init completed on ${cp_ip}."
 }
@@ -589,6 +597,60 @@ EOF
   else
     log "HARVESTER_CSI_HELM_USE=false; helm-controller path skipped."
   fi
+}
+
+wait_for_cnpg() {
+  local cnpg_enabled
+  cnpg_enabled="$(read_values_field cloudNativePG.enabled)"
+  [[ "${cnpg_enabled}" != "true" ]] && return 0
+
+  local cluster_name cluster_ns
+  cluster_name="$(read_values_field cloudNativePG.cluster.name)"
+  [[ -z "${cluster_name}" || "${cluster_name}" == "null" ]] && cluster_name="rancher-postgres"
+  cluster_ns="$(read_values_field cloudNativePG.cluster.namespace)"
+  [[ -z "${cluster_ns}" || "${cluster_ns}" == "null" ]] && cluster_ns="cattle-system"
+
+  echo "Waiting for CNPG cluster ${cluster_name} in ${cluster_ns} to be ready..."
+  local max_attempts=60  # 10 minutes (60 * 10s)
+  local attempt=0
+  while (( attempt < max_attempts )); do
+    local phase
+    phase="$(kubectl --kubeconfig="${RKE2_KUBECONFIG}" -n "${cluster_ns}" \
+      get cluster "${cluster_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "${phase}" == "Cluster in healthy state" ]]; then
+      echo "CNPG cluster ${cluster_name} is healthy."
+      return 0
+    fi
+    echo "  CNPG phase: ${phase:-not found} (attempt $((attempt+1))/${max_attempts})"
+    sleep 10
+    (( attempt++ ))
+  done
+  echo "WARNING: CNPG cluster did not become healthy within timeout. Rancher may fail to start."
+  return 1
+}
+
+wait_for_cilium() {
+  local cilium_enabled
+  cilium_enabled="$(read_values_field cilium.enabled)"
+  [[ "${cilium_enabled}" != "true" ]] && return 0
+
+  log "Waiting for Cilium pods to be ready..."
+  local max_attempts=60
+  local attempt=0
+  while (( attempt < max_attempts )); do
+    local ready
+    ready="$(KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n kube-system get ds cilium -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")"
+    local desired
+    desired="$(KUBECONFIG="${RKE2_KUBECONFIG}" kubectl -n kube-system get ds cilium -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")"
+    if [[ "${ready}" == "${desired}" && "${ready}" != "0" ]]; then
+      log "Cilium DaemonSet ready (${ready}/${desired})."
+      return 0
+    fi
+    log "  Cilium: ${ready}/${desired} ready (attempt $((attempt+1))/${max_attempts})"
+    sleep 10
+    (( attempt++ ))
+  done
+  log "WARNING: Cilium did not become fully ready within timeout."
 }
 
 patch_kubevip_daemonset() {
@@ -946,8 +1008,10 @@ if $SKIP_BOOTSTRAP; then
   log "Skipping guest API wait because bootstrap was skipped."
 else
   wait_for_guest_api
+  wait_for_cilium
   configure_guest_kubevip
   install_harvester_csi
+  wait_for_cnpg
   patch_kubevip_daemonset
   smoke_test_csi || true
 fi
