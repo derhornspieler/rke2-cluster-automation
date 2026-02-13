@@ -1,146 +1,493 @@
-# RKE2 Cluster on Harvester v1.6.1
+# RKE2 Cluster Automation on Harvester
 
-This repo contains manifests plus a Helm chart that provision an RKE2 management cluster on top of Harvester. Helm drives the VM templates, cloud-init, kube-vip, MetalLB, and (optionally) Rancher Manager; you only need to seed the Harvester-side prerequisites once.
+Automated provisioning of production-grade RKE2 Kubernetes clusters on top of Harvester HCI. A single Helm chart drives VM creation, cloud-init configuration, networking (CNI + L2 load balancing), ingress/gateway, certificate management, Rancher Manager, CloudNativePG, and HPA -- all configured through `custom_values.yaml`.
 
 ---
 
-## 1. Prerequisites (run against the **Harvester management cluster**)
+## Architecture Overview
 
-> You can download Harvester’s kubeconfig from the UI (Top-right menu → **Download kubeconfig**) or, if you have console access, use `/etc/rancher/rke2/rke2.yaml`. Set `export KUBECONFIG=/path/to/harvester-kubeconfig` for the commands below.
+```mermaid
+graph TB
+    subgraph Harvester["Harvester Management Cluster"]
+        HelmChart["Helm Chart<br/>(rke2-harvester)"]
+        VMApplyJob["VM Apply Job"]
+        VMTemplates["VM Templates"]
+        CloudConfig["Cloud-Init Secrets"]
+    end
 
-1. **Create the guest namespace** (the Helm release defaults to `rke2` – change if needed)
+    HelmChart --> VMApplyJob
+    HelmChart --> VMTemplates
+    HelmChart --> CloudConfig
+
+    subgraph GuestCluster["RKE2 Guest Cluster"]
+        subgraph CP["Control Plane Nodes"]
+            CP1["CP-1"]
+            CP2["CP-2"]
+            CP3["CP-3"]
+        end
+
+        subgraph Workers["Worker Nodes"]
+            WK1["Worker-1"]
+        end
+
+        KubeVip["kube-vip<br/>(VIP: API Server)"]
+        CNI["CNI<br/>(Cilium or Canal)"]
+        LB["L2 LoadBalancer<br/>(Cilium L2 or MetalLB)"]
+        Ingress["Ingress/Gateway<br/>(Traefik or nginx)"]
+        CertMgr["cert-manager"]
+        Rancher["Rancher Manager"]
+        CNPG["CloudNativePG<br/>(PostgreSQL HA)"]
+        HPA["HPA<br/>(Rancher Autoscaler)"]
+        CSI["Harvester CSI Driver"]
+        CloudProv["Harvester Cloud Provider"]
+    end
+
+    VMApplyJob -->|creates| CP
+    VMApplyJob -->|creates| Workers
+    CloudConfig -->|cloud-init| CP
+    CloudConfig -->|cloud-init| Workers
+
+    CP --> KubeVip
+    CNI --> CP
+    CNI --> Workers
+    LB --> Ingress
+    Ingress --> Rancher
+    Rancher --> CNPG
+    HPA -->|scales| Rancher
+    CertMgr -->|TLS| Ingress
+    CSI -->|storage| CNPG
+```
+
+## Deployment Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Script as deploy_rke2.sh
+    participant Harvester as Harvester Cluster
+    participant Guest as RKE2 Guest Cluster
+
+    User->>Script: ./scripts/deploy_rke2.sh
+    Script->>Harvester: helm upgrade --install (chart + values)
+    Harvester->>Harvester: Create VM Templates + Cloud-Init Secrets
+    Harvester->>Harvester: Run VM Apply Job (sequential VM creation)
+    Harvester-->>Guest: Boot VMs with cloud-init
+
+    Note over Guest: Cloud-init installs RKE2,<br/>writes manifests to<br/>/var/lib/rancher/rke2/server/manifests/
+
+    Guest->>Guest: kube-vip starts (VIP for API)
+    Guest->>Guest: CNI initializes (Cilium or Canal)
+
+    Script->>Guest: Wait for API via VIP
+    Script->>Guest: Extract kubeconfig
+    Script->>Guest: Apply CSI Snapshot CRDs
+    Script->>Guest: Wait for Cilium (if enabled)
+    Script->>Guest: Wait for CNPG (if enabled)
+
+    Note over Guest: helm-controller processes<br/>manifests alphabetically:<br/>cert-manager, CNPG, Rancher,<br/>Traefik, Gateway, HPA
+
+    Script-->>User: Cluster ready
+```
+
+## Networking Stack Options
+
+```mermaid
+graph LR
+    subgraph Option_A["Option A: Cilium + Traefik (Recommended)"]
+        CiliumCNI["Cilium CNI"] --> CiliumL2["Cilium L2<br/>Announcements"]
+        CiliumL2 --> TraefikLB["Traefik<br/>(LoadBalancer)"]
+        TraefikLB --> GatewayAPI["Gateway API<br/>(Gateway + HTTPRoute)"]
+        GatewayAPI --> RancherA["Rancher<br/>(ClusterIP)"]
+    end
+
+    subgraph Option_B["Option B: Canal + MetalLB (Legacy)"]
+        CanalCNI["Canal CNI"] --> MetalLB["MetalLB<br/>(L2 Mode)"]
+        MetalLB --> NginxLB["rke2-ingress-nginx<br/>(LoadBalancer)"]
+        NginxLB --> RancherB["Rancher<br/>(LoadBalancer/Ingress)"]
+    end
+```
+
+---
+
+## Features
+
+| Feature | Description | Values Key |
+|---------|-------------|------------|
+| **Multi-node RKE2** | 3 CP + N workers via Harvester VMs | `replicaCounts.*` |
+| **kube-vip** | Control-plane VIP for HA API access | `kubeVip.*` |
+| **Cilium CNI** | eBPF-based CNI with kube-proxy replacement | `cilium.*`, `rke2.cni: "cilium"` |
+| **Cilium L2 LB** | L2 announcements replacing MetalLB | `cilium.l2.*` |
+| **Traefik** | Gateway API controller via HelmChart CRD | `traefik.*` |
+| **Gateway API** | Gateway + HTTPRoute for Rancher ingress | `gatewayAPI.*` |
+| **MetalLB** | Legacy L2 load balancer (alternative to Cilium) | `metallb.*` |
+| **cert-manager** | Automatic TLS certificate management | `certManager.*` |
+| **Rancher Manager** | Kubernetes management platform | `rancherManager.*` |
+| **CloudNativePG** | HA PostgreSQL for stateless Rancher | `cloudNativePG.*` |
+| **Rancher HPA** | Horizontal Pod Autoscaler for Rancher | `rancherHPA.*` |
+| **Harvester CSI** | Persistent storage via Harvester volumes | Automatic |
+| **Harvester Cloud Provider** | Node lifecycle + LoadBalancer integration | `cloudProvider.*` |
+| **Airgap Support** | Private registries, local repos, offline install | `airgap.*` |
+
+---
+
+## 1. Prerequisites
+
+> Run these against the **Harvester management cluster**. Download its kubeconfig from the Harvester UI or use `/etc/rancher/rke2/rke2.yaml` on a Harvester node.
+
+```bash
+export KUBECONFIG=/path/to/harvester-kubeconfig
+```
+
+1. **Create the guest namespace** (defaults to `rke2`)
    ```bash
    kubectl create namespace rke2
    ```
-   Safe to re-run if it already exists.
 
-2. **Seed OS images** (one time per Harvester cluster)
+2. **Seed OS images** (one-time per Harvester cluster)
    ```bash
-   kubectl apply -f manifests/image/ubuntu.yaml
    kubectl apply -f manifests/image/rocky9.yaml
-   kubectl -n harvester-public get virtualmachineimage  # wait until Ready
+   kubectl -n harvester-public get virtualmachineimage   # wait until Ready
    ```
-3. **Create guest networks/IP pools** (edit VLAN IDs/bridges first if needed)
+
+3. **Create guest networks and IP pools**
    ```bash
    kubectl apply -f manifests/network/networks.yaml
-   kubectl apply -f manifests/network/vmnet-vlan2003-ippool.yaml   # requires Harvester DHCP addon
+   kubectl apply -f manifests/network/vmnet-vlan12-ippool.yaml   # requires Harvester DHCP addon
    ```
-4. **Cloud-provider ServiceAccount + RBAC** (namespace must match the guest VMs; `rke2` by default)
+   See `manifests/network/README.md` for VLAN/bridge details.
+
+4. **Cloud-provider ServiceAccount + RBAC**
    ```bash
    kubectl -n rke2 create serviceaccount rke2-mgmt-cloud-provider
    kubectl create clusterrolebinding rke2-cloud-provider-binding \
      --clusterrole=cluster-admin \
      --serviceaccount=rke2:rke2-mgmt-cloud-provider
    ```
+
 5. **Generate the Harvester CCM kubeconfig**
    ```bash
    curl -sfL https://raw.githubusercontent.com/harvester/cloud-provider-harvester/master/deploy/generate_addon.sh \
      | bash -s rke2-mgmt-cloud-provider rke2
    ```
-   Copy the `########## cloud config ############` block – you will paste it into `cloudProvider.cloudConfig`.
-5. **TLS note** – if you access the Harvester API via IP (e.g., `https://192.168.6.5/...`), either reissue Harvester's management certificate with that IP in its SAN list **or** set `insecure-skip-tls-verify: true` under the `cluster` entry in the generated kubeconfig. Otherwise the CCM cannot connect and the taint is never cleared.
-6. **Rancher TLS (cert-manager recommended)** – Rancher requires TLS on its ingress service.
-   - **Recommended:** enable the bundled cert-manager installation by setting `certManager.enabled: true` in `custom_values.yaml`. Provide the desired certificate parameters (`certManager.certificate.*`) and make sure a ClusterIssuer/Issuer referenced by `certManager.certificate.issuerRef` already exists. The chart installs cert-manager and creates the `Certificate` resource so the secret is managed automatically.
-   - **Manual secret:** if you prefer to manage the secret yourself, generate it before the first `helm upgrade --install`:
-   ```bash
-   export RANCHER_FQDN=rancher.example.com
-   openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-     -keyout tls.key -out tls.crt \
-     -subj "/CN=${RANCHER_FQDN}"
-   kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
-   kubectl create secret tls rancher-private-tls -n cattle-system \
-     --cert=tls.crt --key=tls.key
-   ```
-   Alternatively, edit `manifests/rancher/tls-secret.yaml` or populate `rancherManager.ingress.tlsSecret.certificate`/`privateKey` in `custom_values.yaml` (with `create: true`) so the chart writes the secret during cloud-init. The secret name must match `rancherManager.ingress.tlsSecretName`.
-7. **Optional** – prepare an SSH keypair for cloud-init and ensure the Harvester nodes can reach the internet to download qcow2 images.
+   Copy the `########## cloud config ############` block into `cloudProvider.cloudConfig` in your values file. If accessing Harvester via IP, set `insecure-skip-tls-verify: true` in the generated kubeconfig.
 
----
-
-## 2. Prepare Helm configuration
-
-1. **Copy the default values**
+6. **Bootstrap SSH Secret + RBAC** (required for kubeconfig extraction)
    ```bash
-   cp charts/rke2-harvester/values.yaml custom_values.yaml
-   ```
-2. **Edit `custom_values.yaml`**
-   - `image.namespace` / `image.name` – point at the `VirtualMachineImage` you imported.
-   - `vmNamePrefix` – friendly VM prefix (defaults to the Helm release name).
-   - `storage.*` – disk sizing per role.
-   - `replicaCounts.*` and `resources.*` – control the number/sizing of control-plane vs worker VMs.
-   - `networks.vm.*` – the Multus NAD namespace/name, static IPs, MACs, DNS, etc. Workers require either static IPv4 addresses here or a NAD backed by DHCP/IPAM; otherwise they will only receive link-local IPv6 addresses. Set `networks.vm.dhcp.worker: true` if you want the chart to emit cloud-init network data that requests DHCP on the worker NIC. When DHCP is enabled the chart automatically generates locally-administered MAC addresses (unless you provide your own via `networks.vm.macAddresses.*`) and creates the matching `VirtualMachineNetworkConfig` resources required by Harvester’s DHCP addon.
-   - `kubeVip.*` – enable + configure the control-plane VIP (ensure the IP is reserved).
-   - `cloudProvider.cloudConfig` – paste the kubeconfig from the prerequisite step (or pass it with `--set-file`). Add `insecure-skip-tls-verify: true` if you are using the Harvester API IP.
-   - `metallb.*` (optional) – enable MetalLB and define address pools if you want service-type `LoadBalancer` support for things like Rancher Manager; use `metallb.values` to pass additional upstream Helm settings (for example `speaker.frr.enabled: false` for pure L2 deployments).
-   - `certManager.*` (optional but recommended) – set `certManager.enabled: true` to have the chart install cert-manager via an RKE2 HelmChart and, if desired, create the `Certificate` custom resource that backs Rancher’s ingress secret. Provide the issuer reference and DNS names that match your Rancher hostname.
-   - `rancherManager.ingress.*` – leave `tlsSource` at its default (`rancher`) to have Rancher issue a self-signed CA/ingress certificate. Switch it to `secret` only when the TLS secret already exists (see prerequisite #6) or when you embed the PEM materials via `rancherManager.ingress.tlsSecret`. For cert-manager-managed secrets, keep `tlsSecret.create: false` and point `tlsSecretName` at the Certificate’s target.
-   - `vmDeployment.*` – image/backoff for the lightweight kubectl job that sequentially creates the Harvester VMs. Pick an image that includes `/bin/sh` (e.g. `alpine/kubectl:1.34.2`) so the script can run.
-   - `harvesterTemplates.enabled` – set `false` if you do **not** want Helm to create/replace Harvester `VirtualMachineTemplate`/`Version` objects (useful when Harvester refuses to delete default template versions during upgrades).
-   - `ssh.*`, `rke2.*`, `tlsSANs`, etc., per your environment.
-4. **Bootstrap SSH Secret + RBAC** (required for the kubeconfig extraction job)
-   ```bash
-   kubectl apply -f manifests/bootstrap/ssh-key-secret.yaml   # edit stringData with your private key
+   # Create from template -- fill in your SSH private key
+   cp manifests/bootstrap/ssh-key-secret-template.yaml manifests/bootstrap/ssh-key-secret.yaml
+   # Edit manifests/bootstrap/ssh-key-secret.yaml with your private key
+   kubectl apply -f manifests/bootstrap/ssh-key-secret.yaml
    kubectl apply -f manifests/bootstrap/bootstrap-rbac.yaml
    ```
 
 ---
 
-## 3. Deploy with Helm
+## 2. Configuration
 
-1. **First bootstrap (one control-plane VM)**
+1. **Create your values file**
+   ```bash
+   cp charts/rke2-harvester/values.yaml custom_values.yaml
+   ```
+
+2. **Edit `custom_values.yaml`** -- key sections:
+
+   | Section | Purpose |
+   |---------|---------|
+   | `replicaCounts` | Number of control-plane and worker VMs |
+   | `resources` | CPU/memory per VM role |
+   | `image` | Harvester VirtualMachineImage reference |
+   | `networks.vm` | VLAN, static IPs, DHCP, MAC addresses |
+   | `kubeVip` | Control-plane VIP configuration |
+   | `rke2` | Token, version, CNI selection |
+   | `cilium` | Cilium CNI + L2 LoadBalancer pools |
+   | `traefik` | Traefik gateway controller |
+   | `gatewayAPI` | Gateway API CRDs + Rancher Gateway/HTTPRoute |
+   | `certManager` | cert-manager + TLS certificates |
+   | `rancherManager` | Rancher deployment, hostname, resources |
+   | `cloudNativePG` | PostgreSQL HA for Rancher |
+   | `rancherHPA` | Horizontal Pod Autoscaler for Rancher |
+   | `metallb` | MetalLB L2 (legacy alternative to Cilium L2) |
+   | `cloudProvider` | Harvester CCM kubeconfig |
+   | `airgap` | Private registries, local repos, offline install |
+
+> **Security**: `custom_values.yaml` contains secrets (tokens, passwords) and is listed in `.gitignore`. Never commit it.
+
+---
+
+## 3. Deployment
+
+### Automated deployment (recommended)
+
+The `deploy_rke2.sh` script handles the full lifecycle:
+
+```bash
+./scripts/deploy_rke2.sh
+```
+
+The script:
+1. Runs `helm upgrade --install` against the Harvester cluster
+2. Waits for cloud-init to complete on VMs
+3. Extracts the guest kubeconfig via SSH
+4. Applies CSI Snapshot CRDs (required before Harvester CSI driver starts)
+5. Waits for Cilium readiness (if enabled)
+6. Waits for CNPG cluster health (if enabled)
+7. Patches CSI driver security context (if needed)
+
+### Manual deployment
+
+1. **Install the Helm chart**
    ```bash
    helm upgrade --install rke2 charts/rke2-harvester \
      -n rke2 --create-namespace \
      -f custom_values.yaml
    ```
-   Wait for the VM to reach `STATUS=Running`. If `kubeVip.enabled: true`, test it from a Harvester host: `curl -k https://<vip>:6443/version`.
 
-2. **Scale to desired size** – edit `replicaCounts.controlPlane` / `.worker` and re-run the same `helm upgrade --install` command. A post-install hook job re-applies each VM manifest sequentially and prunes obsolete entries, so the final VM count only depends on your values file.
+2. **Wait for VMs** to reach `Running` status
 
-3. **Bootstrap the guest kubeconfig**
+3. **Extract guest kubeconfig**
    ```bash
    kubectl apply -f manifests/bootstrap/bootstrap-job.yaml
    kubectl -n rke2 logs -f job/rke2-bootstrap
    kubectl -n rke2 get secret rke2-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > rke2.kubeconfig
    export KUBECONFIG=$PWD/rke2.kubeconfig
    ```
-   Delete the job afterward with `kubectl delete -f manifests/bootstrap/bootstrap-job.yaml` if you like.
 
-4. **Validate the Harvester CCM** – after the VMs boot, the Harvester cloud-provider pod (`harvester-cloud-provider-*` in `kube-system`) should reach `Running` and the `node.cloudprovider.kubernetes.io/uninitialized` taint should disappear. If it remains, double-check TLS (SANs vs IP) and that the ServiceAccount from the prerequisites exists and has the clusterrolebinding.
+4. **Apply CSI Snapshot CRDs** (before Harvester CSI driver starts)
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.3.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+   ```
 
-> 📝 Still using the manifest-only workflow? Apply `manifests/rke2-config/configmap.yaml` and `manifests/vm-templates/`, then manage your own `VirtualMachine` CRs with `kubectl apply`. Helm users can skip those directories because the chart creates the cloud-config secret, VM templates (when `harvesterTemplates.enabled: true`), and the VM resources for you.
+5. **Validate the cluster**
+   ```bash
+   kubectl get nodes
+   kubectl -n kube-system get pods
+   ```
 
 ---
 
-## 4. Scaling and Operations
+## 4. Networking Stacks
 
-- **Scale up/down:** change `replicaCounts` and rerun `helm upgrade --install ...`.
-- **Rolling OS image:** import a new `VirtualMachineImage`, update `image.name`, rerun Helm; Harvester recreates VMs on the new template.
-- **CI/CD:** `.gitlab-ci.yml` shows a lint → template → apply → verify pipeline using the same chart.
-- **Hooks:** the chart uses two Helm hooks:
-  - `post-install/post-upgrade` job – applies each VM manifest sequentially (control-planes first, then workers) and deletes any extra VMs. If this job ever fails you can remove it with `kubectl -n <ns> delete job <release>-rke2-harvester-vm-apply` before rerunning Helm.
-  - `pre-delete` job – removes all VMs and their PVCs with `kubectl delete vm,pvc -l app.kubernetes.io/name=<prefix>`. Helm keeps failed hooks around, so clean up any stale hook jobs/pods before reinstalling.
+### Option A: Cilium + Traefik + Gateway API (recommended)
+
+Cilium provides both CNI and L2 LoadBalancer functionality, eliminating MetalLB. Traefik serves as the Gateway API controller, replacing rke2-ingress-nginx.
+
+```yaml
+rke2:
+  cni: "cilium"
+
+cilium:
+  enabled: true
+  l2:
+    enabled: true
+    addressPools:
+      - name: rancher-vip
+        addresses:
+          - 172.16.3.6/32        # Single IP, CIDR notation
+        autoAssign: false
+      - name: general
+        addresses:
+          - 172.16.3.7/30        # Range via CIDR
+        autoAssign: true
+
+traefik:
+  enabled: true
+  service:
+    loadBalancerIP: "172.16.3.6"
+    annotations:
+      cilium.io/pool: rancher-vip
+
+gatewayAPI:
+  enabled: true
+  gateway:
+    hostname: "rancher.example.com"
+```
+
+When Gateway API + Traefik are enabled, Rancher's service type is automatically set to `ClusterIP` (traffic flows through the Traefik Gateway).
+
+### Option B: Canal + MetalLB (legacy)
+
+```yaml
+rke2:
+  cni: "canal"
+
+metallb:
+  enabled: true
+  addressPools:
+    - name: rancher-vip
+      protocol: layer2
+      addresses:
+        - 172.16.3.6-172.16.3.6
+```
 
 ---
 
-## 5. Cleanup
+## 5. Rancher Manager with HA PostgreSQL
 
-1. Remove the Helm release and guest namespace (the pre-delete hook deletes the VMs/PVCs first, then Helm removes the remaining resources):
-   ```bash
-   helm uninstall rke2 -n rke2
-   kubectl delete namespace rke2
-   ```
-2. Optionally remove any cluster-scoped objects you created earlier (e.g. the CCM clusterrolebinding):
-   ```bash
-   kubectl -n harvester-public delete virtualmachineimage rocky-9-cloudimg
-   kubectl -n harvester-public delete virtualmachineimage ubuntu-22.04-cloudimg
-   kubectl delete -f manifests/network/networks.yaml
-   kubectl delete -f manifests/network/vmnet-vlan2003-ippool.yaml
-   kubectl delete clusterrolebinding rke2-cloud-provider-binding
-   kubectl -n rke2 delete serviceaccount rke2-mgmt-cloud-provider
-   ```
+For production Rancher deployments, use CloudNativePG for a stateless Rancher architecture that supports HPA:
 
-Recreate the namespace/service account/bindings if you deploy again later.
+```yaml
+rancherManager:
+  enabled: true
+  hostname: rancher.example.com
+  resources:                          # Required for HPA utilization metrics
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
 
-> ℹ️ All CRDs referenced here match Harvester v1.6.1 (`VirtualMachineImage`, `VirtualMachineTemplate`, etc.).
-*** End Patch
-PATCH
+cloudNativePG:
+  enabled: true
+  cluster:
+    instances: 3                      # 1 primary + 2 replicas
+    database: rancher
+
+rancherHPA:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 7
+  metrics:
+    cpu:
+      averageUtilization: 70
+    memory:
+      averageUtilization: 80
+```
+
+---
+
+## 6. Airgap / Offline Deployment
+
+For environments without internet access, configure the `airgap` section:
+
+```yaml
+airgap:
+  privateCA: |
+    -----BEGIN CERTIFICATE-----
+    ...your CA cert...
+    -----END CERTIFICATE-----
+
+  registries:
+    mirrors:
+      docker.io:
+        endpoint:
+          - "https://registry.internal:5000"
+    configs:
+      "registry.internal:5000":
+        auth:
+          username: admin
+          password: secret
+
+  systemDefaultRegistry: "registry.internal:5000"
+  rke2InstallUrl: "https://repo.internal/rke2/install.sh"
+
+  yumRepos:
+    local-baseos:
+      name: "Local BaseOS Mirror"
+      baseurl: "http://repo.internal/rocky/9/BaseOS/x86_64/os/"
+      gpgcheck: false
+  disableDefaultRepos: true
+```
+
+Each component chart has its own `chartRepo` field (e.g., `rancherManager.chartRepo`, `certManager.chartRepo`) for pointing at internal Helm repos.
+
+---
+
+## 7. Manifest Processing Order
+
+RKE2's helm-controller processes manifests from `/var/lib/rancher/rke2/server/manifests/` alphabetically. The chart uses filename prefixes to control ordering:
+
+| Order | Manifest | Purpose |
+|-------|----------|---------|
+| 1 | `00-gateway-api-crds.yaml` | Gateway API CRD installation Job |
+| 2 | `cert-manager-namespace.yaml` | cert-manager namespace |
+| 3 | `cert-manager.yaml` | cert-manager HelmChart |
+| 4 | `cilium-config.yaml` | Cilium HelmChartConfig customization |
+| 5 | `cnpg-namespace.yaml` | CNPG namespace |
+| 6 | `cnpg-operator.yaml` | CNPG operator HelmChart |
+| 7 | `harvester-cloud-provider-config.yaml` | Cloud provider + kube-vip config |
+| 8 | `kube-vip-rbac.yaml` | kube-vip RBAC |
+| 9 | `kube-vip.yaml` | kube-vip DaemonSet |
+| 10 | `metallb-*.yaml` | MetalLB (if enabled) |
+| 11 | `rancher-*.yaml` | Rancher namespace + HelmChart |
+| 12 | `traefik-*.yaml` | Traefik namespace + HelmChart |
+| 13 | `zz-cilium-l2.yaml` | Cilium L2 pools (needs Cilium CRDs) |
+| 14 | `zz-cnpg-cluster.yaml` | PostgreSQL Cluster CR (needs CNPG CRDs) |
+| 15 | `zz-rancher-gateway.yaml` | Gateway + HTTPRoute (needs Gateway API CRDs) |
+| 16 | `zz-rancher-hpa.yaml` | HPA for Rancher |
+
+---
+
+## 8. Scaling and Operations
+
+- **Scale up/down**: Change `replicaCounts` and rerun `helm upgrade --install` or `deploy_rke2.sh`.
+- **Rolling OS image**: Import a new `VirtualMachineImage`, update `image.name`, rerun Helm.
+- **Hooks**: The chart uses two Helm hooks:
+  - `post-install/post-upgrade` job: Applies VM manifests sequentially (control-planes first, then workers) and prunes extras.
+  - `pre-delete` job: Removes all VMs and PVCs before Helm uninstall.
+
+---
+
+## 9. Cleanup
+
+```bash
+# Full teardown
+helm uninstall rke2 -n rke2
+kubectl delete namespace rke2
+
+# Or use the cleanup script
+./scripts/cleanup_rke2.sh
+```
+
+Optionally remove cluster-scoped prerequisites:
+```bash
+kubectl -n harvester-public delete virtualmachineimage rocky-9-cloudimg
+kubectl delete -f manifests/network/networks.yaml
+kubectl delete -f manifests/network/vmnet-vlan12-ippool.yaml
+kubectl delete clusterrolebinding rke2-cloud-provider-binding
+kubectl -n rke2 delete serviceaccount rke2-mgmt-cloud-provider
+```
+
+---
+
+## Project Structure
+
+```
+rke2-cluster-automation/
+  charts/rke2-harvester/           # Helm chart
+    templates/
+      _helpers.tpl                 # Cloud-init, kube-vip, HelmCharts, all templates
+      configmap.yaml               # Cloud-init data configmap
+      vm-templates.yaml            # Harvester VM templates
+      vm-apply-job.yaml            # Post-install hook for VM creation
+      vm-cleanup-job.yaml          # Pre-delete hook for VM removal
+      ...
+    values.yaml                    # Default values (all features)
+    Chart.yaml
+  scripts/
+    deploy_rke2.sh                 # Main automated deployment script
+    cleanup_rke2.sh                # Cluster teardown script
+    reboot_guest_nodes.sh          # Rolling reboot utility
+  manifests/
+    bootstrap/                     # SSH key secret + RBAC for kubeconfig extraction
+    csi/                           # Harvester CSI driver manifest
+    image/                         # Harvester VirtualMachineImage definitions
+    network/                       # VLAN networks and IP pools
+  custom_values.yaml               # Your environment config (gitignored)
+```
+
+---
+
+## Security Notes
+
+- `custom_values.yaml`, `rke2.kubeconfig`, SSH key secrets, and TLS keys are all listed in `.gitignore` and must never be committed.
+- The `manifests/bootstrap/ssh-key-secret-template.yaml` file is a safe template with empty placeholders. Copy it to `ssh-key-secret.yaml` (gitignored) and fill in your private key.
+- The `manifests/rancher/tls-secret.yaml` file contains placeholder comments, not real certificates.
+- For airgap deployments with private CAs, set `airgap.privateCA` to automatically inject `tls.ca_file` into all registry configurations.
+
+---
+
+## Known Issues
+
+- **Harvester v1.6.1 DHCP bug**: MAC addresses change on VM restart, breaking DHCP reservations. Workaround: use the dev build of `harvester-vm-dhcp-controller` (see `manifests/network/README.md`).
+- **CSI driver CrashLoopBackOff**: VolumeSnapshot CRDs must be applied before the Harvester CSI driver chart is processed. The `deploy_rke2.sh` script handles this automatically.
+- **Cloud-init `systemctl start` timeout**: RKE2's Type=notify service may timeout on first boot. The chart appends `|| true` and includes a health-check loop so cloud-init succeeds even when the initial start returns non-zero.
