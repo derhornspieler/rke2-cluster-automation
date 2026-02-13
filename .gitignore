@@ -1,13 +1,25 @@
+# Secrets and credentials - NEVER commit these
 /manifests/bootstrap/ssh-key-secret.yaml
+/manifests/rancher/tls.key
+/manifests/rancher/tls.crt
+/manifests/rke2-config/configmap.yaml
+*rke2.kubeconfig
+rke2.kubeconfig
+/credentials.yaml
+/credentials.local.yaml
+/custom_values.yaml
+/.env
+/.env.local
+
+# IDE / OS
 /.vscode/
 .DS_Store
 /.idea/
 *.iml
-/.env
-/.env.local
-/credentials.yaml
-/credentials.local.yaml
-/custom_values.yaml
-*rke2.kubeconfig
-rke2.kubeconfig
+
+# Debug/log files
+*.logs
+rancher-pod.logs
+
+# Temp files
 /tmp/*
